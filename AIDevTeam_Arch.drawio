@@ -1,0 +1,106 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="RFRJmndy4iWLPaATL7Qn" name="Page-1">
+    <mxGraphModel dx="1797" dy="1169" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-46" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0E8FC;strokeColor=#9065C0;strokeWidth=2;verticalAlign=top;spacingTop=12;fontStyle=1;fontSize=15;fontColor=#42245F;" value="" vertex="1">
+          <mxGeometry height="792" width="310" x="58" y="478" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-47" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontStyle=1;fontColor=#42245F;" value="GitHub — Task &amp;amp; Audit Control Plane" vertex="1">
+          <mxGeometry height="28" width="330" x="48" y="493" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-48" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9065C0;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Plan&lt;/b&gt;&lt;div&gt;Requirement - Executable Tasks - Dependencies&lt;/div&gt;" vertex="1">
+          <mxGeometry height="82" width="255" x="88" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-49" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9065C0;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Code Repository&lt;/b&gt;&lt;br&gt;Source Code · Commit History&lt;br&gt;Optional Remote Push" vertex="1">
+          <mxGeometry height="82" width="255" x="88" y="1006" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-83" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9065C0;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Label&lt;/b&gt;&lt;br&gt;Task Queue · Priority - Task Type" vertex="1">
+          <mxGeometry height="82" width="255" x="88" y="858" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-84" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9065C0;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Issue&lt;/b&gt;&lt;br&gt;Approval - Feedback · Task Status" vertex="1">
+          <mxGeometry height="82" width="255" x="88" y="709" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-86" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9065C0;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;CI / CD&lt;/b&gt;" vertex="1">
+          <mxGeometry height="82" width="255" x="88" y="1155" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-41" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F1FC;strokeColor=#5285C5;strokeWidth=2;verticalAlign=top;spacingTop=12;fontStyle=1;fontSize=15;fontColor=#17365D;" value="" vertex="1">
+          <mxGeometry height="145" width="860" x="400" y="478" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-42" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontStyle=1;fontColor=#17365D;" value="Human &amp;amp; Automation Interfaces" vertex="1">
+          <mxGeometry height="28" width="850" x="410" y="486" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-43" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5285C5;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;CLI&lt;/b&gt;&lt;br&gt;Typer · devteam run" vertex="1">
+          <mxGeometry height="65" width="177" x="433" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-44" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5285C5;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;REST API&lt;/b&gt;&lt;br&gt;FastAPI · POST /jobs" vertex="1">
+          <mxGeometry height="65" width="177" x="720" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-45" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5285C5;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;OpenClaw / Hermes&lt;/b&gt;&lt;br&gt;Chat Channels · Skills · Cron" vertex="1">
+          <mxGeometry height="65" width="177" x="1040" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-50" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DDF5E5;strokeColor=#55A477;strokeWidth=2;verticalAlign=top;spacingTop=12;fontStyle=1;fontSize=15;fontColor=#174C2D;" value="" vertex="1">
+          <mxGeometry height="170" width="860" x="400" y="680" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-51" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontStyle=1;fontColor=#174C2D;" value="Orchestration Layer" vertex="1">
+          <mxGeometry height="28" width="860" x="400" y="688" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-52" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#55A477;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Planner&lt;/b&gt;&lt;br&gt;Plan Tasks" vertex="1">
+          <mxGeometry height="70" width="147" x="433" y="738.5" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-53" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#55A477;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Approval&lt;/b&gt;&lt;br&gt;Human-in-the-loop" vertex="1">
+          <mxGeometry height="70" width="147" x="649" y="738.5" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-54" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#55A477;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Task Picker&lt;/b&gt;&lt;br&gt;Dependency-aware Scheduling" vertex="1">
+          <mxGeometry height="70" width="147" x="864" y="738.5" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-55" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#55A477;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Agent Dispatch&lt;/b&gt;&lt;br&gt;Workflow Coordination" vertex="1">
+          <mxGeometry height="70" width="147" x="1080" y="738.5" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-57" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0DC;strokeColor=#D99A42;strokeWidth=2;verticalAlign=top;spacingTop=12;fontStyle=1;fontSize=15;fontColor=#70430A;" value="" vertex="1">
+          <mxGeometry height="180" width="860" x="400" y="895" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-58" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontStyle=1;fontColor=#70430A;" value="Agent Execution Layer — One Image, Four Roles" vertex="1">
+          <mxGeometry height="28" width="860" x="400" y="905" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-59" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D99A42;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Planner&lt;/b&gt;&lt;br&gt;/plan" vertex="1">
+          <mxGeometry height="65" width="147" x="433" y="955" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-60" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D99A42;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Coder&lt;/b&gt;&lt;br&gt;/implement" vertex="1">
+          <mxGeometry height="65" width="147" x="651" y="955" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-61" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D99A42;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Tester&lt;/b&gt;&lt;br&gt;/test" vertex="1">
+          <mxGeometry height="65" width="147" x="868" y="955" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-62" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D99A42;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Reviewer&lt;/b&gt;&lt;br&gt;/review" vertex="1">
+          <mxGeometry height="65" width="147" x="1086" y="952.5" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-63" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2F5;strokeColor=#5799A8;strokeWidth=2;verticalAlign=top;spacingTop=12;fontStyle=1;fontSize=15;fontColor=#16434D;" value="" vertex="1">
+          <mxGeometry height="145" width="860" x="400" y="1125" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-64" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=15;fontStyle=1;fontColor=#16434D;" value="Model Layer. / Memory" vertex="1">
+          <mxGeometry height="28" width="860" x="400" y="1127" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-65" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5799A8;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;NVIDIA NIM&lt;/b&gt;&lt;br&gt;OpenAI-compatible API" vertex="1">
+          <mxGeometry height="70" width="240" x="433" y="1175" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-66" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5799A8;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Ollama&lt;/b&gt;&lt;br&gt;Local Inference" vertex="1">
+          <mxGeometry height="70" width="240" x="713" y="1175" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-72" edge="1" parent="1" source="VIK-uFanxkhyDoaXvPG3-45" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#64748B;strokeWidth=1.5;fontSize=15;" target="VIK-uFanxkhyDoaXvPG3-44" value="HTTP /jobs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-88" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#5799A8;strokeWidth=1.4;fontSize=15;fontColor=#243247;align=center;verticalAlign=middle;spacing=7;" value="&lt;b&gt;Redis&lt;/b&gt;&lt;br&gt;Checkpoint - Memory" vertex="1">
+          <mxGeometry height="70" width="240" x="993" y="1175" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-90" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=1;fontSize=15;align=center;verticalAlign=middle;opacity=60;opacityGroup=1;" value="&lt;b&gt;Tools&lt;/b&gt;" vertex="1">
+          <mxGeometry height="36" width="177" x="515" y="1029" as="geometry" />
+        </mxCell>
+        <mxCell id="VIK-uFanxkhyDoaXvPG3-91" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=1;fontSize=15;align=center;verticalAlign=middle;opacity=60;opacityGroup=1;" value="&lt;b&gt;MCP&lt;/b&gt;" vertex="1">
+          <mxGeometry height="36" width="177" x="920" y="1029" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
