@@ -1,7 +1,5 @@
 """Coder agent: implements the planned files, optionally applying reviewer feedback."""
 
-from pathlib import Path
-
 from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
@@ -25,7 +23,7 @@ Rules:
 """
 
 
-def code_node(state: TeamState) -> dict:
+def coder(state: TeamState) -> dict:
     settings = get_settings()
     iteration = state.get("iteration", 0) + 1
     feedback = state.get("feedback") or []
@@ -37,11 +35,11 @@ def code_node(state: TeamState) -> dict:
             f"[bold green]▶ Coder[/bold green] revision {iteration}/{settings.max_iterations}…"
         )
 
-    workspace = state.get("workspace") or str(create_workspace())
+    workspace = create_workspace(state["run_id"])
 
     plan = state["plan"]
     plan_text = "\n".join(f"- {f.path}: {f.description}" for f in plan.files)
-    messages: list = [
+    messages = [
         SystemMessage(content=CODER_SYSTEM),
         HumanMessage(
             content=(
@@ -60,7 +58,7 @@ def code_node(state: TeamState) -> dict:
         )
 
     result: CodeResult = get_structured_llm(CodeResult).invoke(messages)
-    written = write_files(Path(workspace), result.files)
+    written = write_files(workspace, result.files)
     for path in written:
         console.print(f"  [green]wrote[/green] {path.name} ({path.stat().st_size} bytes)")
     if result.notes:
@@ -68,7 +66,6 @@ def code_node(state: TeamState) -> dict:
 
     return {
         "code": result,
-        "workspace": workspace,
         "iteration": iteration,
         "feedback": [],  # consumed
     }

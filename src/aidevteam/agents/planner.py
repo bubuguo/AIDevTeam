@@ -20,7 +20,7 @@ Given a task, produce a concise, buildable plan:
 """
 
 
-def plan_node(state: TeamState) -> dict:
+def planner(state: TeamState) -> dict:
     console.print("[bold cyan]▶ Planner[/bold cyan] drafting the build plan…")
     llm = get_structured_llm(Plan)
     plan: Plan = llm.invoke(

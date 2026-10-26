@@ -43,7 +43,7 @@ def _render_for_review(path: str, content: str) -> str:
     )
 
 
-def review_node(state: TeamState) -> dict:
+def reviewer(state: TeamState) -> dict:
     console.print("[bold magenta]▶ Reviewer[/bold magenta] evaluating the submission…")
     plan = state["plan"]
     code = state["code"]

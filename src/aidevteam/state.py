@@ -64,7 +64,7 @@ class TeamState(TypedDict, total=False):
     """State flowing through the Planner → Coder → Tester → Reviewer graph."""
 
     task: str
-    workspace: str
+    run_id: str
     plan: Plan
     code: CodeResult
     test_report: TestReport

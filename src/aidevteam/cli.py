@@ -6,6 +6,7 @@ from rich.panel import Panel
 
 from aidevteam.config import get_settings
 from aidevteam.graph import build_graph
+from aidevteam.workspace import new_run_id, workspace_for
 
 app = typer.Typer(
     add_completion=False,
@@ -23,21 +24,24 @@ def run(
     """Build a Python CLI app from TASK using the agent pipeline.
     """
     settings = get_settings()
+    run_id = new_run_id()
 
     console.print(
         Panel(
             f"[bold]{task}[/bold]",
             title="aidevteam",
-            subtitle=f"endpoint={settings.host} · model={settings.resolved_model}",
+            subtitle=f"run={run_id} · endpoint={settings.host} · model={settings.resolved_model}",
         )
     )
 
     graph = build_graph()
-    final = graph.invoke({"task": task, "iteration": 0}, {"recursion_limit": 40})
+    final = graph.invoke(
+        {"task": task, "run_id": run_id, "iteration": 0}, {"recursion_limit": 40}
+    )
 
     review = final.get("review")
     report = final.get("test_report")
-    workspace = final.get("workspace", "")
+    workspace = str(workspace_for(run_id))
     code = final.get("code")
 
     if review and review.approved:

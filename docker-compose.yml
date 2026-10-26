@@ -1,0 +1,114 @@
+# One container per node: the LangGraph orchestrator talks to each node
+# service over HTTP (async job pattern — see src/aidevteam/rpc.py).
+#
+# Compatible with both `docker compose` and `podman compose` (podman-compose):
+# - resource limits use mem_limit/cpus (not deploy.resources)
+# - no profiles; the orchestrator is invoked with `compose run`
+# - startup ordering is handled by rpc.py's connect-retry, not healthcheck gates
+#
+# Usage:
+#   podman compose up -d --build planner coder tester reviewer
+#   podman compose run --rm orchestrator graph
+#   podman compose run --rm orchestrator run "build a CSV to JSON CLI tool"
+
+services:
+  planner:
+    build: .
+    image: aidevteam:latest
+    command: ["python", "-m", "aidevteam.node_server", "planner", "8000"]
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      # Runtime tuning must be visible in every container — it is NOT baked
+      # into the image, so without this mount all properties silently fall
+      # back to code defaults. Read-only: edits apply on the next run.
+      - ./aidevteam.properties:/app/aidevteam.properties:ro
+    # no volume: planner only reads from and write to state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 60s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 1.0
+
+  coder:
+    image: aidevteam:latest
+    build: .
+    command: ["python", "-m", "aidevteam.node_server", "coder", "8000"]
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - ./aidevteam.properties:/app/aidevteam.properties:ro
+      - ./generated:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 60s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 1.0
+
+  tester:
+    image: aidevteam:latest
+    build: .
+    command: ["python", "-m", "aidevteam.node_server", "tester", "8000"]
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - ./aidevteam.properties:/app/aidevteam.properties:ro
+      - ./generated:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 60s
+      timeout: 5s
+      retries: 12
+    mem_limit: 2g      # pytest runs the generated suites here
+    cpus: 2.0
+
+  reviewer:
+    image: aidevteam:latest
+    build: .
+    command: ["python", "-m", "aidevteam.node_server", "reviewer", "8000"]
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - ./aidevteam.properties:/app/aidevteam.properties:ro
+    # no volume for workspace data: reviewer judges code passed via state, never touches the workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 60s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 1.0
+
+  # Not a long-running service: invoke on demand with
+  #   podman compose run --rm orchestrator <run|graph> ...
+  orchestrator:
+    image: aidevteam:latest
+    build: .
+    entrypoint: ["aidevteam"]
+    command: ["--help"]
+    environment:
+      # Path convention only — the orchestrator never touches the workspace
+      # itself (dirs are created by coder, files written by coder/tester)
+    env_file:
+      - .env
+    volumes:
+      - ./aidevteam.properties:/app/aidevteam.properties:ro
+    depends_on:
+      - planner
+      - coder
+      - tester
+      - reviewer
+    mem_limit: 512m
+    cpus: 0.5

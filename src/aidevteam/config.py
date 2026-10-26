@@ -78,10 +78,30 @@ class Settings(BaseSettings):
     llm_api_key: str = ""   # optional; local Ollama needs none
     llm_base_url: str = ""  # REQUIRED
     llm_model: str = ""     # REQUIRED
+    # Seconds without received data before an LLM call is aborted. This is a
+    # read timeout, not a total limit — long generations are fine as long as
+    # tokens keep streaming. Without it a stalled connection hangs the pipeline.
+    llm_timeout: float = 300.0
 
     # Runtime tuning — settable via aidevteam.properties
     temperature: float = 0.2
     max_iterations: int = 3
+
+    # Remote node execution: each node runs in its own container and is
+    # driven over HTTP (async job pattern). The service URL is derived from
+    # the node role, so adding a new node type requires no URL configuration.
+    node_port: int = 8000
+    node_poll_interval: float = 2.0   # seconds between job-status polls
+    node_max_wait: float = 3600.0     # give up if a job runs longer than this
+    node_connect_grace: float = 60.0  # retry window while containers start up
+
+    def node_url(self, role: str) -> str:
+        """Base URL of a node service, derived from its role name.
+
+        Each container has its own network stack, so every service can listen
+        on the same port and the URL is simply the service name + port.
+        """
+        return f"http://{role}:{self.node_port}"
 
     @model_validator(mode="after")
     def _require_llm_endpoint(self) -> "Settings":
@@ -120,18 +140,12 @@ class Settings(BaseSettings):
 
     @property
     def resolved_base_url(self) -> str:
-        if not self.llm_base_url.strip():
-            raise RuntimeError(
-                "LLM_BASE_URL is not set — add LLM_BASE_URL=<openai-compatible-endpoint> to your .env"
-            )
+        """Guaranteed non-empty by the fail-fast validator."""
         return self.llm_base_url.strip()
 
     @property
     def resolved_model(self) -> str:
-        if not self.llm_model.strip():
-            raise RuntimeError(
-                "LLM_MODEL is not set — add LLM_MODEL=<model-id> to your .env"
-            )
+        """Guaranteed non-empty by the fail-fast validator."""
         return self.llm_model.strip()
 
     @property

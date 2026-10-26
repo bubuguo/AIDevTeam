@@ -1,5 +1,7 @@
 """Sandbox workspace helpers: safe file writing and subprocess execution."""
 
+import os
+import secrets
 import subprocess
 import sys
 import time
@@ -10,10 +12,38 @@ from aidevteam.state import GeneratedFile
 MAX_OUTPUT_CHARS = 6000
 
 
-def create_workspace(root: Path | None = None) -> Path:
-    """Create a timestamped sandbox directory under ./generated/."""
-    base = root or Path.cwd() / "generated"
-    workspace = base / time.strftime("%Y%m%d-%H%M%S")
+def new_run_id() -> str:
+    """A run identifier used as the workspace directory name and in job ids.
+
+    Format: ``<timestamp>-<4 hex chars>``, e.g. ``20261024-234247-9f3a`` —
+    sortable by name, unique within the same second.
+    """
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+
+
+def workspace_root(root: Path | None = None) -> Path:
+    """The workspace base directory.
+
+    Defaults to ``./generated`` and can be overridden with the
+    AIDEVTEAM_WORKSPACE_ROOT env var (containers mount the shared workspace
+    volume at /workspace).
+    """
+    return root or Path(os.environ.get("AIDEVTEAM_WORKSPACE_ROOT") or Path.cwd() / "generated")
+
+
+def workspace_for(run_id: str, root: Path | None = None) -> Path:
+    """The workspace directory for a run: ``<root>/<run_id>`` (single source
+    of truth — every node derives the same path from the run id)."""
+    return workspace_root(root) / run_id
+
+
+def create_workspace(run_id: str, root: Path | None = None) -> Path:
+    """Create (idempotently) the workspace directory for a run.
+
+    Idempotent because the Coder re-derives the workspace on every revision
+    iteration; run-id uniqueness comes from new_run_id's random suffix.
+    """
+    workspace = workspace_for(run_id, root)
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 
@@ -50,7 +80,3 @@ def run_command(cmd: list[str], cwd: Path, timeout: int = 180) -> tuple[int, str
         return 124, f"Command timed out after {timeout}s: {' '.join(cmd)}"
     except OSError as exc:
         return 1, f"Failed to run command: {exc}"
-
-
-def python_executable() -> str:
-    return sys.executable

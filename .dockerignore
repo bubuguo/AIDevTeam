@@ -1,0 +1,15 @@
+# Secrets and local state never enter the image (injected at runtime instead).
+.env
+.venv/
+generated/
+.git/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+uv.lock
+tests/
+.vscode/
+.idea/
+.DS_Store

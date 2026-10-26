@@ -8,8 +8,8 @@ Flow:
 
 from langgraph.graph import END, START, StateGraph
 
-from aidevteam.agents import code_node, plan_node, review_node, test_node
 from aidevteam.config import get_settings
+from aidevteam.rpc import call_node
 from aidevteam.state import TeamState
 
 
@@ -23,13 +23,30 @@ def _route_after_review(state: TeamState) -> str:
     return "coder"
 
 
+def _remote_node(name: str):
+    """Wrap a remote node service (one container per node) as a graph node."""
+
+    def node(state: TeamState) -> dict:
+        return call_node(name, dict(state))
+
+    node.__name__ = f"{name}_remote"
+    return node
+
+
 def build_graph():
-    """Compile the multi-agent graph."""
+    """Compile the multi-agent graph.
+
+    Every node runs in its own container; the graph drives them over HTTP
+    (async job pattern, see rpc.py). Node functions follow the naming
+    convention (agents/<name>.py defines <name>()). The wiring below is
+    intentionally explicit — workflows are not always linear chains and
+    conditional edges may live on any node.
+    """
     graph = StateGraph(TeamState)
-    graph.add_node("planner", plan_node)
-    graph.add_node("coder", code_node)
-    graph.add_node("tester", test_node)
-    graph.add_node("reviewer", review_node)
+    graph.add_node("planner", _remote_node("planner"))
+    graph.add_node("coder", _remote_node("coder"))
+    graph.add_node("tester", _remote_node("tester"))
+    graph.add_node("reviewer", _remote_node("reviewer"))
 
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "coder")

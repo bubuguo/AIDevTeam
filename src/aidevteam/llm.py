@@ -20,6 +20,7 @@ def get_llm(**kwargs) -> ChatOpenAI:
         api_key=settings.llm_api_key or "ollama",  # placeholder; unauthenticated endpoints ignore it
         base_url=settings.resolved_base_url,
         streaming=True,
+        timeout=settings.llm_timeout,
         **kwargs,
     )
 
