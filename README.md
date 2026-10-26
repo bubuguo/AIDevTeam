@@ -286,7 +286,7 @@ result = llm.with_structured_output(
 AIDevTeam$ python -m aidevteam.cli run 'Create a JSON formatting tool'
 ```
 
-![AI 开发团队生成代码的过程](./docAsset/result_01.svg)
+![AI 开发团队生成代码的过程](./docAsset/result_01.png)
 
 系统会按照预先定义的工作流执行任务：先制定开发计划，再生成代码、运行测试，最后由 Reviewer 检查结果，并根据执行情况决定是否需要继续修改。
 
@@ -298,7 +298,7 @@ AIDevTeam$ python -m aidevteam.cli run 'Create a JSON formatting tool'
 
 生成的代码在 ./generated/ 目录中。接下来，试着运行它生成的代码。
 
-![运行 AI 开发团队生成的代码](./docAsset/result_02.svg)
+![运行 AI 开发团队生成的代码](./docAsset/result_02.png)
 
 从实际运行结果来看，生成的工具已经具备了比较完整的基本功能。
 
@@ -308,7 +308,7 @@ AIDevTeam$ python -m aidevteam.cli run 'Create a JSON formatting tool'
 
 继续传入一个 JSON 字符串，验证工具能否正常处理输入并输出格式化后的结果。
 
-![测试 JSON 格式化功能](./docAsset/result_03.svg)
+![测试 JSON 格式化功能](./docAsset/result_03.png)
 
 测试成功。
 
