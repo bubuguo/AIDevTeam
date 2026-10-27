@@ -1,14 +1,9 @@
 """State serialization and HTTP transport for remote node execution.
 
-The LangGraph orchestrator runs in its own container while each node
-(planner/coder/tester/reviewer) runs as a small HTTP service in its own
-container (see ``node_server.py``). This module is the shared contract
-between the two sides:
-
-- ``encode_state`` / ``decode_update`` convert TeamState slices between
-  pydantic models and JSON-safe dicts;
-- ``call_node`` submits a state to a node service and polls until the job
-  finishes, retrying connection errors while containers start up.
+Each node (planner/coder/tester/reviewer) runs as an HTTP service in its own
+container (see node_server.py); this module is the shared contract:
+encode_state/decode_update convert TeamState slices between pydantic models
+and JSON-safe dicts, and call_node submits a state and polls until done.
 """
 
 import time
@@ -20,8 +15,8 @@ from pydantic import BaseModel
 from aidevteam.config import get_settings
 from aidevteam.state import TeamState
 
-# Model-typed TeamState fields, derived from the state definition itself so a
-# new model field works over RPC without touching this module.
+# Model-typed TeamState fields, derived from the state definition so new
+# model fields work over RPC without touching this module.
 _STATE_MODELS: dict[str, type[BaseModel]] = {
     name: ann
     for name, ann in get_type_hints(TeamState).items()
@@ -54,18 +49,11 @@ def decode_update(update: dict[str, Any]) -> dict[str, Any]:
 
 
 def call_node(role: str, state: dict[str, Any]) -> dict[str, Any]:
-    """Submit the state to ``role``'s node service and wait for its result.
+    """Submit state to ``role``'s node service and poll until it finishes.
 
-    The call is asynchronous under the hood: ``POST /run`` returns a job id
-    immediately and the orchestrator polls ``GET /jobs/{id}`` until the node
-    finishes. Node execution time is unpredictable (LLM latency, pytest
-    runs), so no HTTP connection is ever held open for the duration of a
-    task; only the poll loop waits, bounded by ``node_max_wait``.
-
-    Connection errors on submit are retried for up to ``node_connect_grace``
-    seconds so the orchestrator tolerates containers that are still starting
-    up. A failed job raises immediately — a node must never be silently
-    re-executed, as its side effects (e.g. files written) are not idempotent.
+    Submit retries connection errors for ``node_connect_grace`` (containers
+    still starting up); a failed job raises immediately — nodes are never
+    silently re-executed, as their side effects are not idempotent.
     """
     settings = get_settings()
     base = settings.node_url(role).rstrip("/")

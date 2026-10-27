@@ -66,6 +66,8 @@ class TeamState(TypedDict, total=False):
     task: str
     run_id: str
     plan: Plan
+    plan_approved: bool
+    plan_feedback: list[str]
     code: CodeResult
     test_report: TestReport
     review: Review

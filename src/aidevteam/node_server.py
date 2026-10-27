@@ -1,18 +1,12 @@
 """Expose a single agent node as an HTTP service (one container per node).
 
-Usage:
-    python -m aidevteam.node_server <planner|coder|tester|reviewer> [port]
+Usage: python -m aidevteam.node_server <planner|coder|tester|reviewer> [port]
 
-The service is stateless and asynchronous:
-
-- ``POST /run`` validates a JSON-encoded TeamState slice, starts the node in
-  a background thread and immediately returns ``{"job_id": ...}``;
-- ``GET /jobs/{id}`` reports ``running`` / ``done`` / ``error`` plus the
-  encoded state update once finished.
-
-Node execution time is unpredictable (LLM latency, pytest runs), so no HTTP
-connection is held open for the duration of a task — the orchestrator polls
-(see ``rpc.call_node``). ``GET /health`` is used by container healthchecks.
+POST /run validates the state, starts the node in a background thread and
+returns {"job_id": ...}; GET /jobs/{id} reports running/done/error. Node
+execution time is unpredictable (LLM latency, pytest), so the orchestrator
+polls instead of holding a connection (see rpc.call_node). GET /health
+serves container healthchecks.
 """
 
 import sys
@@ -73,10 +67,11 @@ class _JobStore:
 
 
 def _job_id(role: str, decoded: dict[str, Any]) -> str:
-    """Deterministic, greppable job id tied to the run: <run_id>-<role>-<iteration>.
+    """Greppable job id: <run_id>-<role>-<iteration>.
 
-    (run_id, role, incoming iteration) is unique within a run, so no random
-    component is needed. The /run endpoint rejects payloads without run_id.
+    Unique within a run: the approval gate bumps iteration on every rejected
+    plan (and resets it on approval), so the planner can run several times
+    per run without colliding.
     """
     return f"{decoded['run_id']}-{role}-{decoded.get('iteration', 0)}"
 
@@ -112,8 +107,7 @@ def create_app(role: str) -> FastAPI:
                 status_code=422, detail=f"Invalid state payload: {exc}"
             ) from exc
         if not decoded.get("run_id"):
-            # Every job is tied to a pipeline run; the orchestrator always
-            # seeds run_id into the initial state.
+            # Every job must be tied to a pipeline run (the orchestrator seeds run_id).
             raise HTTPException(status_code=422, detail="run_id is required")
         job_id = _job_id(role, decoded)
         store.create(job_id)

@@ -44,8 +44,8 @@ def tester(state: TeamState) -> dict:
             ),
         ]
     )
-    # Remove stale test files from previous iterations so pytest only
-    # collects the current suite (old tests may target outdated APIs).
+    # Drop stale test files from previous iterations (they may target
+    # outdated APIs and would be collected by pytest).
     for stale in workspace.glob("test_*.py"):
         stale.unlink()
         console.print(f"  [dim]removed stale[/dim] {stale.name}")
@@ -54,7 +54,6 @@ def tester(state: TeamState) -> dict:
     for file in suite.files:
         console.print(f"  [yellow]wrote[/yellow] {file.path} ({len(file.content)} chars)")
 
-    # Run the real test suite.
     exit_code, output = run_command(
         [sys.executable, "-m", "pytest", "-q", "--tb=short"], workspace
     )

@@ -1,14 +1,9 @@
-"""Application settings loaded from environment variables / .env file.
+"""Settings from environment variables / .env, plus a Java-style properties
+file (default ./aidevteam.properties, override with AIDEVTEAM_PROPERTIES_FILE).
 
-Vendor-neutral by design: any OpenAI-compatible endpoint (NIM, Ollama, vLLM,
-OpenRouter, …) works by setting LLM_BASE_URL / LLM_MODEL / LLM_API_KEY.
-LLM_BASE_URL and LLM_MODEL are required — there are no defaults.
-
-Runtime tuning (temperature, max_iterations, …) can be set in a Java-style
-properties file (default: ./aidevteam.properties, override the path with the
-AIDEVTEAM_PROPERTIES_FILE env var). Precedence, highest first:
-
-    CLI flags > environment variables / .env > aidevteam.properties > defaults
+Vendor-neutral: any OpenAI-compatible endpoint works (LLM_BASE_URL /
+LLM_MODEL required, LLM_API_KEY optional). Precedence, highest first:
+CLI flags > environment variables / .env > properties file > defaults.
 """
 
 import os
@@ -78,18 +73,20 @@ class Settings(BaseSettings):
     llm_api_key: str = ""   # optional; local Ollama needs none
     llm_base_url: str = ""  # REQUIRED
     llm_model: str = ""     # REQUIRED
-    # Seconds without received data before an LLM call is aborted. This is a
-    # read timeout, not a total limit — long generations are fine as long as
-    # tokens keep streaming. Without it a stalled connection hangs the pipeline.
+    # Read timeout, not a total limit — long generations are fine while
+    # tokens stream; without it a stalled connection hangs the pipeline.
     llm_timeout: float = 300.0
 
     # Runtime tuning — settable via aidevteam.properties
     temperature: float = 0.2
     max_iterations: int = 3
 
-    # Remote node execution: each node runs in its own container and is
-    # driven over HTTP (async job pattern). The service URL is derived from
-    # the node role, so adding a new node type requires no URL configuration.
+    # True = a human must approve the plan before coding starts; the CLI's
+    # --plan-approval/--no-plan-approval flags override this per invocation.
+    plan_approval: bool = True
+
+    # Remote node execution: each node runs in its own container, driven
+    # over HTTP. URLs derive from the role name — new nodes need no config.
     node_port: int = 8000
     node_poll_interval: float = 2.0   # seconds between job-status polls
     node_max_wait: float = 3600.0     # give up if a job runs longer than this

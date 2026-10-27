@@ -1,6 +1,9 @@
 """Planner agent: turns a natural-language task into a structured build plan."""
 
+import json
+
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 from rich.console import Console
 
 from aidevteam.llm import get_structured_llm
@@ -22,11 +25,33 @@ Given a task, produce a concise, buildable plan:
 
 def planner(state: TeamState) -> dict:
     console.print("[bold cyan]▶ Planner[/bold cyan] drafting the build plan…")
+    feedback = state.get("plan_feedback") or []
+    previous = state.get("plan")
+    task_text = f"Task:\n{state['task']}"
+    if feedback:
+        # Previous plan rejected at the gate — revision must address all feedback.
+        console.print(
+            "[bold cyan]  ↻ previous plan rejected — addressing feedback:[/bold cyan]"
+        )
+        for item in feedback:
+            console.print(f"    [yellow]-[/yellow] {item}")
+        previous_json = (
+            previous.model_dump_json(indent=2)
+            if isinstance(previous, BaseModel)
+            else json.dumps(previous, indent=2, default=str)
+        )
+        task_text += (
+            "\n\nYour previous plan was rejected by the team. Here it is:\n\n"
+            + previous_json
+            + "\n\nProduce a new plan that keeps what works and addresses "
+            + "ALL of this feedback:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+        )
     llm = get_structured_llm(Plan)
     plan: Plan = llm.invoke(
         [
             SystemMessage(content=PLANNER_SYSTEM),
-            HumanMessage(content=f"Task:\n{state['task']}"),
+            HumanMessage(content=task_text),
         ]
     )
     console.print(f"  [cyan]app:[/cyan] {plan.app_name} — {plan.summary}")
