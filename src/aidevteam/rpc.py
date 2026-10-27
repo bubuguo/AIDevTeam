@@ -95,10 +95,14 @@ def call_node(role: str, state: dict[str, Any]) -> dict[str, Any]:
         if status == "done":
             return decode_update(body["result"] or {})
         if status == "error":
-            raise RuntimeError(f"Node {role!r} job {job_id} failed: {body.get('error')}")
+            raise RuntimeError(
+                f"Node {role!r} job {job_id} failed: {body.get('error')} "
+                f"(check: podman logs aidevteam_{role}_1)"
+            )
         if time.monotonic() >= poll_deadline:
             raise RuntimeError(
                 f"Node {role!r} job {job_id} did not finish within "
-                f"{settings.node_max_wait:.0f}s"
+                f"{settings.node_max_wait:.0f}s "
+                f"(check: podman logs aidevteam_{role}_1)"
             )
         time.sleep(settings.node_poll_interval)

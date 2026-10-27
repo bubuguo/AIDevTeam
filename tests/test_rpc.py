@@ -99,7 +99,7 @@ def test_call_node_retries_connection_errors_then_gives_up(monkeypatch):
 
 
 def test_call_node_raises_on_job_error_without_reexecution(monkeypatch):
-    """A failed job must raise, never re-submit the work."""
+    """A failed job must raise immediately, pointing at the node's logs."""
 
     def fake_post(url, json=None, timeout=None):
         return _fake_response("POST", url, {"job_id": "job-9"})
@@ -111,5 +111,5 @@ def test_call_node_raises_on_job_error_without_reexecution(monkeypatch):
     monkeypatch.setattr("aidevteam.rpc.httpx.get", fake_get)
     monkeypatch.setattr("aidevteam.rpc.time.sleep", lambda _s: None)
 
-    with pytest.raises(RuntimeError, match="bad plan"):
+    with pytest.raises(RuntimeError, match=r"bad plan.*podman logs aidevteam_reviewer_1"):
         call_node("reviewer", {"task": "t"})
