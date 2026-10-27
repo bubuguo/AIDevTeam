@@ -108,9 +108,9 @@ Reviewer 不只是输出一段审查意见，还会影响整个工作流接下�
 于是，我们的AI团队就以迭代的流程进行运作：
 
 ```text
-             ┌─────────────────────┐
-             │                     │
-             ▼                     │
+               ┌───────────────────┐
+               │                   │
+               ▼                   │
 Plan → Code → Test → Review ───────┘
                            │
                            ▼
@@ -128,6 +128,19 @@ Plan → Code → Test → Review ───────┘
 例如，如果每次修改都无法通过测试，系统就需要有最大迭代次数等限制，避免不断重复同样的失败。
 
 第一版先建立基本的回路，后续再逐步完善这些控制机制。
+
+### 3. 让Graph跑起来
+
+在graph创建好之后，我们可以通过invoke函数，让我们的工作流跑起来
+
+```python
+graph.invoke({"task": task, "iteration": 0}, {"recursion_limit": 40})
+```
+
+其中第一个参数 `{"task": task, "iteration": 0}` 是我们Graph的启动参数
+
+第二个参数是LangGraph的控制参数， `{"recursion_limit": 40}` 表示当前执行的Graph的最大允许40步，防止工作流无限循环。
+
 
 ## 三、TeamState：节点之间如何共享信息？
 
