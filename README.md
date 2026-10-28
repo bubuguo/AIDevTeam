@@ -25,7 +25,6 @@
 
 ```text
   ┌─────────┐           ┌─────────────┐
-  │         │           │             │
   ▼         │           ▼             │
 Plan → Plan Approve → Code → Test → Review
                                       │
