@@ -1,136 +1,3 @@
-# 从 AI Coding 到 AI 开发团队：我要参与
-
-在上一篇文章中，我们对 AIDevTeam 进行了容器化改造， 对 AI 有了基础的安全围栏
-
-然而最近打水的频率显著增加，肾结石都变小了。然而作为一个超级资深程序员，长期坐在旁边看 AI 自己干活，实在缺乏参与感。
-
-我决定重新体现一下自己的重要性：在 AI 输出开发计划之后，我要提出修改意见，让 AI 在我的指导下把工作做得更加完美。
-
-当然，这不只是为了满足我的参与感。
-
-在实际业务中，让人参与 AI 的执行过程是一个很常见的需求。例如，等待用户补充信息，等待外部任务完成、等待资源就绪，或者在执行高风险操作之前要求人工授权。
-
-这些场景有一个共同点：**工作流需要在某个节点暂停，等待外部条件满足后，再从原来的位置继续执行。**
-
-## 一、让工作流暂停
-
-在 AIDevTeam 中，Planner 负责生成开发计划。在之前的版本中， AI 直接按照计划进入编码阶段，这个版本
-
-如果计划合理，就继续执行；如果需要调整，就把修改意见交给 AI，让 AI 根据意见重新完善计划。
-
-这样，工作流就变成了：
-
-`Planner → Plan Approve → Coder → Tester → Reviewer`
-
-当然，并不意味着只能增加一个人工审批节点，我们可以根据任务风险，在合适的节点增加人工介入。
-
-## 二、具体改动
-
-### 1. 增加人工审批节点
-
-在 Planner 生成计划之后，增加一个 `approve_plan` 节点，专门负责将计划提交给人工审核。
-
-当执行到这个节点时，工作流通过 `interrupt()` 暂停，并将当前计划返回给调用方。
-
-人工可以选择批准计划，也可以提供修改意见。
-
-这里需要注意：`interrupt()` 本身并不负责实现审批界面。它负责中断工作流并传递需要处理的信息，具体如何展示计划、接收用户意见，则由调用方负责。
-
-### 2. 增加条件边
-
-收到人工审批结果后，需要根据结果决定工作流的下一步。
-
-- 如果批准计划，就进入 Coder 节点。
-- 如果需要修改，就将反馈交给 Planner，重新生成计划。
-
-### 3. 增加 Checkpointer
-
-引入中断之后，还有一个问题需要解决：工作流暂停时，当前状态应该保存在哪里？
-
-例如，Planner 已经生成了计划，工作流在等待人工审核。几分钟后，甚至更长时间之后，用户才提交审批结果。
-
-此时，我们需要恢复之前的工作流，而不是重新执行一遍 Planner。
-
-LangGraph 提供了 Checkpointer 机制，用于保存和恢复工作流状态。配合 `interrupt()` 使用时，可以让工作流在中断后等待外部输入，并在收到恢复指令后继续执行。
-
-同时，调用方需要在暂停和恢复时使用相同的 `thread_id`，让 LangGraph 找到对应的工作流状态。
-
-因此，这次改造除了增加审批节点，还需要配置 Checkpointer，并调整调用流程，使它能够处理暂停、等待人工输入和恢复执行的完整过程。
-
-
-
-说起暂停工作流，我们就需要使用LangGraph 框架中 `interrupt()` 机制，其实上包含了4项具体的任务
-1. 暂停工作流
-2. 保存工作流状态
-3. 恢复工作流状态
-4. 继续工作流
-
-
-## 具体实现
-
-首先我们需要将Graph停下来
-在Plan节点之后，增加approve_plan节点，在pprove_plan节点中调用interrupt，让Graph停下来，interrupt中的对象就是审核所需要的内容
-```
-interrupt(
-        {
-            "plan": plan.model_dump() if isinstance(plan, BaseModel) else plan,
-            "revision": state.get("iteration", 0),
-        }
-    )
-```
-
-
-第二就是保存中断信息, 还记得在第一个版本时我们是通过 `graph.invoke` 使Graph跑起来的吧。
-
-这次在启动Graph时增加了thread_id，用来恢复时关联到这次执行
-
-```
-    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}
-    state: dict = graph.invoke(
-        {"task": task, "run_id": run_id, "iteration": 0}, config
-    )
-```
-
-之后我们就可以通过读取中断后返回state对象的"__interrupt__"属性来获取中断的具体信息
-
-```
-    while state.get("__interrupt__"):
-        payload = state["__interrupt__"][0].value or {}
-        
-        # retrieve interrupt payload
-        # payload.get("plan")
-```
-
-可以看到state["__interrupt__"]其实是个List对象，这里留个尾巴，以后用到再说
-
-
-接下来就是
-当人工完成审批后，调用方通过 `Command(resume=...)` 向工作流传回审批结果，继续中断的工作流。
-
-```
-    resume = {"approved": False, "feedback": feedback}
-    state = graph.invoke(Command(resume=resume), config)
-```
-
-config中指向了之前中断的那个thread_id
-
-流程讲完了，其实最重要的一点没说
-
-流程中断后状态存在哪，恢复时从哪读。
-
-```
-    return graph.compile(
-        checkpointer=MemorySaver(
-            serde=JsonPlusSerializer(allowed_msgpack_modules=_msgpack_allowlist())
-        )
-    )
-```
-
-
-
-
-
-
 
 # 从 AI Coding 到 AI 开发团队：我要参与
 
@@ -156,9 +23,17 @@ config中指向了之前中断的那个thread_id
 
 这样，工作流就变成了：
 
-`Planner → Plan Approve → Coder → Tester → Reviewer`
+```text
+  ┌─────────┐           ┌─────────────┐
+  │         │           │             │
+  ▼         │           ▼             │
+Plan → Plan Approve → Code → Test → Review
+                                      │
+                                      ▼
+                                     End
+```
 
-当然，并不意味着只能增加一个人工审批节点，我们可以根据任务风险，在合适的节点增加人工介入。
+当然，并不意味着只能增加一个人工审批节点，我们可以根据任务风险，在合适的位置增加人工节点，永续人工的介入。
 
 说到这里，就需要用到 LangGraph 提供的 `interrupt()` 机制。
 
@@ -297,9 +172,15 @@ return graph.compile(
 
 后面我们会解决这个问题。
 
+### 5. 跑一遍
+![人工审核](./docAsset/approve.png)
+
+我们看到，在我发表意见后 Planer 在此意见上重新制定了开发计划。实际上我们还可以进行多轮的审批，这里为了展示方便之进行了一次。
+
+
 ## 三、下一步
 
-通过这次改造，AIDevTeam 终于具备了人工参与工作流的基本能力。
+通过这次改造，AIDevTeam 具备了人工参与工作流的基本能力。
 
 Planner 不再生成计划后就直接进入编码阶段，而是可以先停下来等待我的意见。批准之后继续执行，需要修改时则将反馈交给 AI 重新完善计划。
 
