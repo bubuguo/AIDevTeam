@@ -169,7 +169,7 @@ podman-compose run --rm orchestrator run "写一个把md文件转html的命令�
 podman compose logs -f orchestrator planner coder tester reviewer | grep -v 'GET '
 ```
 
-···
+```
 Mac> AIDevTeam$ podman compose logs --follow orchestrator planner coder tester reviewer 
 >>>> Executing external compose provider "/opt/homebrew/bin/podman-compose". Please see podman-compose(1) for how to disable this message. <<<<
 
@@ -385,7 +385,7 @@ Mac> AIDevTeam$ podman compose logs --follow orchestrator planner coder tester r
 [reviewer]     | ▶ Reviewer evaluating the submission…
 [reviewer]     | INFO:     10.89.1.6:36080 - "POST /run HTTP/1.1" 202 Accepted
 [reviewer]     |   ✔ approved
-···
+```
 
 从日志中可以看到，各个 Agent 会按照工作流依次执行。
 
