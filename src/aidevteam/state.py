@@ -1,6 +1,7 @@
 """Graph state and structured artifacts passed between agents."""
 
-from typing import TypedDict
+from functools import lru_cache
+from typing import TypedDict, get_type_hints
 
 from pydantic import BaseModel, Field
 
@@ -74,3 +75,21 @@ class TeamState(TypedDict, total=False):
     feedback: list[str]
     iteration: int
     approved: bool
+    # Whether the run started with the human approval gate enabled. Recorded
+    # in the checkpoint so `resume` can rebuild the graph with the same
+    # topology the run was started with.
+    plan_approval: bool
+
+
+@lru_cache(maxsize=1)
+def msgpack_allowlist() -> tuple[tuple[str, str], ...]:
+    """(module, ClassName) for every pydantic model in TeamState.
+
+    The checkpointer serializes state to msgpack; langgraph requires pydantic
+    types to be explicitly allowlisted for deserialization.
+    """
+    return tuple(
+        (ann.__module__, ann.__name__)
+        for ann in get_type_hints(TeamState).values()
+        if isinstance(ann, type) and issubclass(ann, BaseModel)
+    )

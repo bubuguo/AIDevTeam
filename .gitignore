@@ -14,6 +14,9 @@ dist/
 # Generated agent workspaces
 generated/
 
+# Persistent checkpointer database (workflow state)
+state/
+
 # Test / tooling caches
 .pytest_cache/
 .mypy_cache/

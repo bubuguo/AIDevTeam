@@ -56,6 +56,7 @@ LLM_API_KEY=sk-...                        # 可选，本地 Ollama 等无需鉴�
 ```properties
 temperature=0.2
 max_iterations=3
+checkpoint_db=./state/checkpoints.db
 ```
 
 配置优先级（高 → 低）：CLI flags > 环境变量 / `.env` > `aidevteam.properties` > 默认值。
@@ -75,7 +76,7 @@ max_iterations=3
 
 ```bash
 # 前置：项目根目录需要有 .env（LLM 端点配置），并创建 generated/ 目录
-mkdir -p generated
+mkdir -p generated state
 
 # 构建镜像并启动 4 个节点服务（podman 与 docker 命令相同，二选一）
 podman compose up -d --build planner coder tester reviewer
@@ -84,6 +85,10 @@ podman compose up -d --build planner coder tester reviewer
 # 按需运行流水线（orchestrator 不是常驻服务）
 podman-compose run --rm orchestrator run "写一个把摄氏度转华氏度的命令行工具"
 # docker 用户：docker compose run --rm orchestrator run "..."
+
+# 查看已保存的运行记录 / 在新容器里继续一条暂停的工作流
+podman-compose run --rm orchestrator list
+podman-compose run --rm orchestrator resume <run_id>
 
 # 只打印流水线 Mermaid 图（不需要 LLM）
 podman-compose run --rm orchestrator graph
@@ -99,6 +104,16 @@ podman compose down
   子命令请直接使用 `podman-compose run`；`up`/`logs`/`down` 等不受影响。
 - **workspace 共享**：`./generated` 以 bind mount 挂载为容器内 `/workspace`，coder 写入、
   tester 执行测试，产物直接落在宿主机 `./generated/<时间戳>/`。
+- **状态持久化**：orchestrator 把工作流状态（计划、代码、评审结论）写入 SQLite 数据库，
+  默认位于宿主机 `./state/checkpoints.db`（容器内 `/app/state/checkpoints.db`，以 bind
+  mount 挂载）。因此 `run` 退出或容器被 `--rm` 删除后，工作流仍可恢复：用
+  `aidevteam list` 查看记录，用 `aidevteam resume <run_id>` 继续。
+- **宿主机直接跑 CLI 的权限**：容器以 root 运行，若 `./state` 由容器首次创建，它会属于
+  root，宿主机普通用户随后执行 `aidevteam list` / `resume` 会因无权写入而失败。
+  解决：先在宿主机 `mkdir -p state`（目录归当前用户），或用 `sudo chown -R $USER state`。
+- **SQLite 与 bind mount**：SQLite 默认启用 WAL 模式，在部分网络/虚拟化文件系统的 bind
+  mount 上可能不稳定。若出现 `database is locked` 或损坏，把 orchestrator 的
+  `./state:/app/state` 换成具名卷（如 `aidevteam-state:/app/state`）即可。
 - **新增节点类型**：在 `agents/<name>.py` 定义 `<name>(state)` 并在 `build_graph` 里
   `add_node` 接线，再加一段 compose 服务即可——服务 URL 由角色名自动推导
   （`http://<role>:8000`），无需任何 URL 配置。

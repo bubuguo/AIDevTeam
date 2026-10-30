@@ -8,10 +8,7 @@ The gate is always wired in; with plan_approval disabled it passes through
 without pausing.
 """
 
-from typing import get_type_hints
-
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
@@ -67,19 +64,6 @@ def approve_plan(state: TeamState) -> dict:
     }
 
 
-def _msgpack_allowlist() -> tuple[tuple[str, str], ...]:
-    """(module, ClassName) for every pydantic model in TeamState.
-
-    The checkpointer serializes state to msgpack; langgraph requires pydantic
-    types to be explicitly allowlisted for deserialization.
-    """
-    return tuple(
-        (ann.__module__, ann.__name__)
-        for ann in get_type_hints(TeamState).values()
-        if isinstance(ann, type) and issubclass(ann, BaseModel)
-    )
-
-
 def _approve_plan_node(enabled: bool):
     """Wrap the approval gate, bypassing it entirely when disabled.
 
@@ -107,16 +91,21 @@ def _remote_node(name: str):
     return node
 
 
-def build_graph(plan_approval: bool = True):
+def build_graph(
+    checkpointer: BaseCheckpointSaver,
+    plan_approval: bool = True,
+):
     """Compile the agent graph; agent nodes run in their own containers over
     HTTP (see rpc.py). Node functions follow the naming convention
     (agents/<name>.py defines <name>()).
 
     The approve_plan gate sits between planner and coder; when
-    ``plan_approval`` is false it passes through without pausing. Always
-    compiled with an in-memory checkpointer (required for interrupt/resume,
-    handy for state inspection; runs live in one process, keyed by
-    thread_id=run_id).
+    ``plan_approval`` is false it passes through without pausing.
+
+    A checkpointer is required for interrupt()/resume and for state
+    inspection. Callers that need the state to outlive the process inject a
+    persistent one (see checkpoint.py); callers that only need a temporary
+    graph can inject an in-memory saver explicitly.
     """
     graph = StateGraph(TeamState)
     graph.add_node("planner", _remote_node("planner"))
@@ -138,8 +127,6 @@ def build_graph(plan_approval: bool = True):
         {"planner": "planner", "coder": "coder"},
     )
 
-    return graph.compile(
-        checkpointer=MemorySaver(
-            serde=JsonPlusSerializer(allowed_msgpack_modules=_msgpack_allowlist())
-        )
-    )
+    if checkpointer is None:
+        raise ValueError("checkpointer is required")
+    return graph.compile(checkpointer=checkpointer)

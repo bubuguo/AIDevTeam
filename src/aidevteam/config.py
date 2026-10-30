@@ -21,6 +21,7 @@ from pydantic_settings import (
 )
 
 DEFAULT_PROPERTIES_FILE = "aidevteam.properties"
+DEFAULT_CHECKPOINT_DB = "./state/checkpoints.db"
 
 
 class PropertiesConfigSource(PydanticBaseSettingsSource):
@@ -84,6 +85,11 @@ class Settings(BaseSettings):
     # True = a human must approve the plan before coding starts; the CLI's
     # --plan-approval/--no-plan-approval flags override this per invocation.
     plan_approval: bool = True
+
+    # SQLite file backing the persistent checkpointer. Relative paths resolve
+    # against the working directory, so the same value works on the host and
+    # in the container (WORKDIR=/app).
+    checkpoint_db: str = DEFAULT_CHECKPOINT_DB
 
     # Remote node execution: each node runs in its own container, driven
     # over HTTP. URLs derive from the role name — new nodes need no config.

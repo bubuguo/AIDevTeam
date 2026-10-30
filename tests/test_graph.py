@@ -1,5 +1,8 @@
 """Unit tests for graph construction (containerized execution)."""
 
+import pytest
+from langgraph.checkpoint.memory import MemorySaver
+
 from aidevteam.graph import (
     _approve_plan_node,
     _remote_node,
@@ -14,20 +17,20 @@ WIRED_AGENTS = ("planner", "coder", "tester", "reviewer")
 
 
 def test_graph_wires_all_discovered_agents():
-    graph = build_graph().get_graph()
+    graph = build_graph(checkpointer=MemorySaver()).get_graph()
     assert set(WIRED_AGENTS) <= set(graph.nodes)
 
 
 def test_nodes_are_rpc_wrappers():
     for name in WIRED_AGENTS:
         assert _remote_node(name).__name__ == f"{name}_remote"
-    graph = build_graph().get_graph()
+    graph = build_graph(checkpointer=MemorySaver()).get_graph()
     assert set(WIRED_AGENTS) <= set(graph.nodes)
 
 
 def test_plan_approval_gate_is_wired_by_default():
     """The planner must route through the human gate before any coding starts."""
-    graph = build_graph().get_graph()
+    graph = build_graph(checkpointer=MemorySaver()).get_graph()
     assert "approve_plan" in graph.nodes
     edges = {(edge.source, edge.target) for edge in graph.edges}
     assert ("planner", "approve_plan") in edges
@@ -35,7 +38,7 @@ def test_plan_approval_gate_is_wired_by_default():
 
 def test_graph_without_plan_approval_passes_through_the_gate(monkeypatch):
     """Disabled gate: same topology, but the node never interrupts."""
-    graph = build_graph(plan_approval=False).get_graph()
+    graph = build_graph(plan_approval=False, checkpointer=MemorySaver()).get_graph()
     assert "approve_plan" in graph.nodes
     edges = {(edge.source, edge.target) for edge in graph.edges}
     assert ("planner", "approve_plan") in edges
@@ -52,8 +55,18 @@ def test_graph_without_plan_approval_passes_through_the_gate(monkeypatch):
 def test_graph_always_has_checkpointer():
     """The gate needs it for interrupt()/resume; plain runs get inspectable
     state (get_state / state history) for free."""
-    assert build_graph().checkpointer is not None
-    assert build_graph(plan_approval=False).checkpointer is not None
+    assert build_graph(checkpointer=MemorySaver()).checkpointer is not None
+    assert (
+        build_graph(plan_approval=False, checkpointer=MemorySaver()).checkpointer
+        is not None
+    )
+
+
+def test_build_graph_requires_a_checkpointer():
+    with pytest.raises(TypeError):
+        build_graph()
+    with pytest.raises(ValueError, match="checkpointer is required"):
+        build_graph(checkpointer=None)
 
 
 def test_approved_plan_goes_to_coder():

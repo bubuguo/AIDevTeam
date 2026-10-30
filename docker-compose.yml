@@ -105,6 +105,10 @@ services:
       - .env
     volumes:
       - ./aidevteam.properties:/app/aidevteam.properties:ro
+      # Persistent checkpointer database: the orchestrator is a one-shot
+      # container (compose run --rm), so the SQLite file must live on a
+      # mounted volume to survive the container.
+      - ./state:/app/state
     depends_on:
       - planner
       - coder
