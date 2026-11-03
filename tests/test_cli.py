@@ -192,8 +192,7 @@ def test_run_stores_the_workflow_in_the_persistent_checkpointer(checkpoint_db, m
     captured: dict = {}
 
     class _FakeGraph:
-        def __init__(self, plan_approval: bool = True, checkpointer=None):
-            captured["plan_approval"] = plan_approval
+        def __init__(self, checkpointer=None):
             captured["checkpointer"] = checkpointer
 
         def invoke(self, payload, config):
@@ -207,7 +206,5 @@ def test_run_stores_the_workflow_in_the_persistent_checkpointer(checkpoint_db, m
     result = CliRunner().invoke(app, ["run", "build a demo"])
     assert result.exit_code == 0
     assert isinstance(captured["checkpointer"], SqliteSaver)
-    # The gate mode is recorded so `resume` can rebuild the same topology.
-    assert captured["payload"]["plan_approval"] is True
     assert captured["config"]["configurable"]["thread_id"] == captured["payload"]["run_id"]
     assert checkpoint_db.is_file()

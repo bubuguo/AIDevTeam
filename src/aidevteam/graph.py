@@ -4,8 +4,7 @@
                ↑             │       ↑                 │
                └── comment ──┘       └──── revisions ──┘   (max N iterations)                
 
-The gate is always wired in; with plan_approval disabled it passes through
-without pausing.
+The gate is always wired in; it pauses for human approval before coding starts.
 """
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -64,23 +63,6 @@ def approve_plan(state: TeamState) -> dict:
     }
 
 
-def _approve_plan_node(enabled: bool):
-    """Wrap the approval gate, bypassing it entirely when disabled.
-
-    The node is always wired into the graph so the topology is identical in
-    both modes; with the gate off it returns immediately without calling
-    interrupt(), so the run never pauses.
-    """
-
-    def node(state: TeamState) -> dict:
-        if not enabled:
-            return {"plan_approved": True}
-        return approve_plan(state)
-
-    node.__name__ = "approve_plan"
-    return node
-
-
 def _remote_node(name: str):
     """Wrap a remote node service (one container per node) as a graph node."""
 
@@ -93,14 +75,13 @@ def _remote_node(name: str):
 
 def build_graph(
     checkpointer: BaseCheckpointSaver,
-    plan_approval: bool = True,
 ):
     """Compile the agent graph; agent nodes run in their own containers over
     HTTP (see rpc.py). Node functions follow the naming convention
     (agents/<name>.py defines <name>()).
 
-    The approve_plan gate sits between planner and coder; when
-    ``plan_approval`` is false it passes through without pausing.
+    The approve_plan gate sits between planner and coder; it pauses for
+    human approval before coding starts.
 
     A checkpointer is required for interrupt()/resume and for state
     inspection. Callers that need the state to outlive the process inject a
@@ -112,7 +93,7 @@ def build_graph(
     graph.add_node("coder", _remote_node("coder"))
     graph.add_node("tester", _remote_node("tester"))
     graph.add_node("reviewer", _remote_node("reviewer"))
-    graph.add_node("approve_plan", _approve_plan_node(plan_approval))
+    graph.add_node("approve_plan", approve_plan)
 
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "approve_plan")

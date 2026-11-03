@@ -132,11 +132,6 @@ def run(
     task: str = typer.Argument(
         ..., help="Natural-language description of the CLI app to build."
     ),
-    plan_approval: bool | None = typer.Option(
-        None,
-        "--plan-approval/--no-plan-approval",
-        help="Require human approval of the plan before coding. Default: follow the plan_approval setting.",
-    ),
 ) -> None:
     """Build a Python CLI app from TASK using the agent pipeline."""
     settings = get_settings()
@@ -150,21 +145,16 @@ def run(
         )
     )
 
-    # plan_approval=True means a human must approve the plan before coding;
-    # an explicitly passed flag overrides the settings.
-    approval = settings.plan_approval if plan_approval is None else plan_approval
+    # Every task plan must be approved by a human.
     # Resuming an interrupt needs the same thread (thread_id=run_id) + checkpointer.
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}
     with persistent_checkpointer() as saver:
-        graph = build_graph(plan_approval=approval, checkpointer=saver)
+        graph = build_graph(checkpointer=saver)
         state: dict = graph.invoke(
             {
                 "task": task,
                 "run_id": run_id,
                 "iteration": 0,
-                # Recorded in the checkpoint so `resume` can rebuild the graph
-                # with the same topology the run was started with.
-                "plan_approval": approval,
             },
             config,
         )
@@ -185,19 +175,13 @@ def resume(
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}
 
     with persistent_checkpointer() as saver:
-        graph = build_graph(plan_approval=settings.plan_approval, checkpointer=saver)
+        # Every task plan must be approved by a human.
+        graph = build_graph(checkpointer=saver)
         snapshot = graph.get_state(config)
         values = snapshot.values or {}
         if not values:
             console.print(f"[bold red]✘ unknown run: {run_id}[/bold red]")
             raise typer.Exit(code=1)
-
-        # The gate mode is part of the graph topology: rebuild the graph the
-        # way the run was started, otherwise the pending interrupt would be
-        # replayed by a node that no longer calls interrupt().
-        approval = bool(values.get("plan_approval", settings.plan_approval))
-        if approval != settings.plan_approval:
-            graph = build_graph(plan_approval=approval, checkpointer=saver)
 
         console.print(
             Panel(
@@ -240,7 +224,7 @@ def list_runs(
             return
 
         # get_state() only reads the checkpoint, so the gate mode is irrelevant.
-        graph = build_graph(plan_approval=False, checkpointer=saver)
+        graph = build_graph(checkpointer=saver)
         table = Table(title="runs")
         table.add_column("run id", style="bold")
         table.add_column("app")

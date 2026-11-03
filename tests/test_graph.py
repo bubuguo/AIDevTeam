@@ -4,7 +4,6 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from aidevteam.graph import (
-    _approve_plan_node,
     _remote_node,
     _route_after_plan_approval,
     _route_after_review,
@@ -36,30 +35,10 @@ def test_plan_approval_gate_is_wired_by_default():
     assert ("planner", "approve_plan") in edges
 
 
-def test_graph_without_plan_approval_passes_through_the_gate(monkeypatch):
-    """Disabled gate: same topology, but the node never interrupts."""
-    graph = build_graph(plan_approval=False, checkpointer=MemorySaver()).get_graph()
-    assert "approve_plan" in graph.nodes
-    edges = {(edge.source, edge.target) for edge in graph.edges}
-    assert ("planner", "approve_plan") in edges
-
-    # The pass-through must not pause the run: interrupt() must stay uncalled.
-    def boom(payload):
-        raise AssertionError("interrupt() called with the gate disabled")
-
-    monkeypatch.setattr("aidevteam.graph.interrupt", boom)
-    node = _approve_plan_node(False)
-    assert node({"plan": None}) == {"plan_approved": True}
-
-
 def test_graph_always_has_checkpointer():
     """The gate needs it for interrupt()/resume; plain runs get inspectable
     state (get_state / state history) for free."""
     assert build_graph(checkpointer=MemorySaver()).checkpointer is not None
-    assert (
-        build_graph(plan_approval=False, checkpointer=MemorySaver()).checkpointer
-        is not None
-    )
 
 
 def test_build_graph_requires_a_checkpointer():
