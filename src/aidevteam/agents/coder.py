@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
 from aidevteam.config import get_settings
+from aidevteam.issuecontext import fetch_issue_context
 from aidevteam.llm import get_structured_llm
 from aidevteam.state import CodeResult, TeamState
 from aidevteam.workspace import create_workspace, write_files
@@ -26,7 +27,10 @@ Rules:
 def coder(state: TeamState) -> dict:
     settings = get_settings()
     iteration = state.get("iteration", 0) + 1
-    feedback = state.get("feedback") or []
+    # The reviewer's feedback is checkpointed as part of the review verdict,
+    # so it survives a restart without being duplicated in the state.
+    review = state.get("review")
+    feedback = list(review.feedback) if review is not None else []
 
     if iteration == 1:
         console.print("[bold green]▶ Coder[/bold green] implementing the plan…")
@@ -35,15 +39,20 @@ def coder(state: TeamState) -> dict:
             f"[bold green]▶ Coder[/bold green] revision {iteration}/{settings.max_iterations}…"
         )
 
-    workspace = create_workspace(state["run_id"])
+    issue_id = state["issue_id"]
+    workspace = create_workspace(issue_id)
 
-    plan = state["plan"]
+    context = fetch_issue_context(issue_id)
+    plan = context.plan
+    if plan is None:
+        raise RuntimeError(f"issue {issue_id} has no plan to implement")
+
     plan_text = "\n".join(f"- {f.path}: {f.description}" for f in plan.files)
     messages = [
         SystemMessage(content=CODER_SYSTEM),
         HumanMessage(
             content=(
-                f"Task:\n{state['task']}\n\n"
+                f"Task:\n{context.task}\n\n"
                 f"Plan ({plan.app_name}): {plan.summary}\n"
                 f"Example commands: {', '.join(plan.cli_commands) or 'n/a'}\n"
                 f"Files to implement:\n{plan_text}"
@@ -67,5 +76,4 @@ def coder(state: TeamState) -> dict:
     return {
         "code": result,
         "iteration": iteration,
-        "feedback": [],  # consumed
     }

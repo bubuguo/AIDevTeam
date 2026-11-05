@@ -61,6 +61,25 @@ checkpoint_db=./state/checkpoints.db
 
 配置优先级（高 → 低）：CLI flags > 环境变量 / `.env` > `aidevteam.properties` > 默认值。
 
+### 配置 GitHub Issue 跟踪（必需）
+
+每次构建都以 GitHub Issue 编号作为唯一标识（`issue_id`），因此必须在 `.env` 中配置：
+
+```bash
+GITHUB_TOKEN=github_pat_...       # 需要 Issues 的读写权限
+GITHUB_OWNER=repository-owner
+GITHUB_REPO=repository-name
+```
+
+`run` 会先为任务创建一个 Issue，并将每版计划草稿和最终批准的计划追加为
+Issue 评论。Issue 编号保存在 checkpoint 中，也是 LangGraph `thread_id`、workspace
+目录名和节点 job ID 的来源，因此 `resume <issue_id>` 会继续向原 Issue 发表评论。
+GitHub 配置缺失或 API 调用失败会终止构建，因为此时没有可用的唯一 `issue_id`。
+
+升级说明：旧版本 checkpoint 使用 `run_id`（时间戳格式），不包含 `issue_id`，因此不能
+通过 `resume` 继续；系统不会自动迁移或生成本地替代 ID。请为新任务创建 GitHub Issue
+并重新运行。
+
 ### 运行示例
 
 流水线通过容器运行（见下节「容器化运行」）。`python -m aidevteam.cli graph` 可在本地
@@ -88,7 +107,7 @@ podman-compose run --rm orchestrator run "写一个把摄氏度转华氏度的�
 
 # 查看已保存的运行记录 / 在新容器里继续一条暂停的工作流
 podman-compose run --rm orchestrator list
-podman-compose run --rm orchestrator resume <run_id>
+podman-compose run --rm orchestrator resume <issue_id>
 
 # 只打印流水线 Mermaid 图（不需要 LLM）
 podman-compose run --rm orchestrator graph
@@ -103,11 +122,11 @@ podman compose down
 - **podman 用户注意**：`podman compose run`（包装器）在 macOS 上有 EINTR bug，`run`
   子命令请直接使用 `podman-compose run`；`up`/`logs`/`down` 等不受影响。
 - **workspace 共享**：`./generated` 以 bind mount 挂载为容器内 `/workspace`，coder 写入、
-  tester 执行测试，产物直接落在宿主机 `./generated/<时间戳>/`。
+  tester 执行测试，产物直接落在宿主机 `./generated/<issue_id>/`。
 - **状态持久化**：orchestrator 把工作流状态（计划、代码、评审结论）写入 SQLite 数据库，
   默认位于宿主机 `./state/checkpoints.db`（容器内 `/app/state/checkpoints.db`，以 bind
   mount 挂载）。因此 `run` 退出或容器被 `--rm` 删除后，工作流仍可恢复：用
-  `aidevteam list` 查看记录，用 `aidevteam resume <run_id>` 继续。
+  `aidevteam list` 查看记录，用 `aidevteam resume <issue_id>` 继续。
 - **宿主机直接跑 CLI 的权限**：容器以 root 运行，若 `./state` 由容器首次创建，它会属于
   root，宿主机普通用户随后执行 `aidevteam list` / `resume` 会因无权写入而失败。
   解决：先在宿主机 `mkdir -p state`（目录归当前用户），或用 `sudo chown -R $USER state`。

@@ -82,10 +82,6 @@ class Settings(BaseSettings):
     temperature: float = 0.2
     max_iterations: int = 3
 
-    # True = a human must approve the plan before coding starts; the CLI's
-    # --plan-approval/--no-plan-approval flags override this per invocation.
-    plan_approval: bool = True
-
     # SQLite file backing the persistent checkpointer. Relative paths resolve
     # against the working directory, so the same value works on the host and
     # in the container (WORKDIR=/app).
@@ -97,6 +93,16 @@ class Settings(BaseSettings):
     node_poll_interval: float = 2.0   # seconds between job-status polls
     node_max_wait: float = 3600.0     # give up if a job runs longer than this
     node_connect_grace: float = 60.0  # retry window while containers start up
+
+    # GitHub Issue Tracking Configuration (required: issue number is issue_id)
+    github_token: str = ""   # GitHub personal access token
+    github_owner: str = ""   # Repository owner
+    github_repo: str = ""   # Repository name
+
+    # Plan approval gate: the run polls the GitHub issue until the human
+    # comments /approve or /reject. A timeout of 0 (or less) waits forever.
+    approval_poll_interval: float = 5.0   # seconds between issue polls
+    approval_timeout: float = 3600.0      # give up waiting after this long
 
     def node_url(self, role: str) -> str:
         """Base URL of a node service, derived from its role name.

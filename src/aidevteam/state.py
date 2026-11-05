@@ -62,23 +62,28 @@ class Review(BaseModel):
 
 
 class TeamState(TypedDict, total=False):
-    """State flowing through the Planner → Coder → Tester → Reviewer graph."""
+    """State flowing through the Planner → Coder → Tester → Reviewer graph.
 
-    task: str
-    run_id: str
-    plan: Plan
-    plan_approved: bool
-    plan_feedback: list[str]
+    Only the *essential* state is checkpointed. The task, the plan and the
+    human feedback are transient agent context: they live on the run's
+    GitHub issue and are fetched from there whenever a node needs them, so
+    a checkpoint never grows with the size of the plan or the code.
+    """
+
+    # Essential checkpointed state
+    issue_id: int
     code: CodeResult
     test_report: TestReport
     review: Review
-    feedback: list[str]
-    iteration: int
     approved: bool
-    # Whether the run started with the human approval gate enabled. Recorded
-    # in the checkpoint so `resume` can rebuild the graph with the same
-    # topology the run was started with.
-    plan_approval: bool
+    # The human's verdict on the plan. It is persisted so the conditional
+    # edge after approve_plan can route on it; the plan itself stays
+    # transient and is re-read from the issue.
+    plan_approved: bool
+    # The revision counter. It is a counter rather than context, and it must
+    # survive a restart — otherwise the max_iterations guard would reset
+    # every time the run is resumed.
+    iteration: int
 
 
 @lru_cache(maxsize=1)

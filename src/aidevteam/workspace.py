@@ -1,24 +1,12 @@
 """Sandbox workspace helpers: safe file writing and subprocess execution."""
 
 import os
-import secrets
 import subprocess
-import sys
-import time
 from pathlib import Path
 
 from aidevteam.state import GeneratedFile
 
 MAX_OUTPUT_CHARS = 6000
-
-
-def new_run_id() -> str:
-    """A run identifier used as the workspace directory name and in job ids.
-
-    Format: ``<timestamp>-<4 hex chars>``, e.g. ``20261024-234247-9f3a`` —
-    sortable by name, unique within the same second.
-    """
-    return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
 
 
 def workspace_root(root: Path | None = None) -> Path:
@@ -31,19 +19,22 @@ def workspace_root(root: Path | None = None) -> Path:
     return root or Path(os.environ.get("AIDEVTEAM_WORKSPACE_ROOT") or Path.cwd() / "generated")
 
 
-def workspace_for(run_id: str, root: Path | None = None) -> Path:
-    """The workspace directory for a run: ``<root>/<run_id>`` (single source
-    of truth — every node derives the same path from the run id)."""
-    return workspace_root(root) / run_id
+def workspace_for(issue_id: int, root: Path | None = None) -> Path:
+    """The workspace directory for an issue: ``<root>/<issue_id>``.
+
+    The GitHub issue number is the only identifier, so every node derives the
+    same workspace path from it.
+    """
+    return workspace_root(root) / str(issue_id)
 
 
-def create_workspace(run_id: str, root: Path | None = None) -> Path:
-    """Create (idempotently) the workspace directory for a run.
+def create_workspace(issue_id: int, root: Path | None = None) -> Path:
+    """Create (idempotently) the workspace directory for an issue.
 
     Idempotent because the Coder re-derives the workspace on every revision
-    iteration; run-id uniqueness comes from new_run_id's random suffix.
+    iteration.
     """
-    workspace = workspace_for(run_id, root)
+    workspace = workspace_for(issue_id, root)
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 

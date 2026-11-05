@@ -6,6 +6,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 from rich.console import Console
 
+from aidevteam.github_issue import get_github_issue_tool
+from aidevteam.github_workflow import format_plan_comment, plan_to_dict
+from aidevteam.issuecontext import fetch_issue_context
 from aidevteam.llm import get_structured_llm
 from aidevteam.state import Plan, TeamState
 
@@ -25,9 +28,12 @@ Given a task, produce a concise, buildable plan:
 
 def planner(state: TeamState) -> dict:
     console.print("[bold cyan]▶ Planner[/bold cyan] drafting the build plan…")
-    feedback = state.get("plan_feedback") or []
-    previous = state.get("plan")
-    task_text = f"Task:\n{state['task']}"
+    issue_id = state["issue_id"]
+    context = fetch_issue_context(issue_id)
+
+    feedback = context.plan_feedback or []
+    previous = context.plan
+    task_text = f"Task:\n{context.task}"
     if feedback:
         # Previous plan rejected at the gate — revision must address all feedback.
         console.print(
@@ -57,4 +63,12 @@ def planner(state: TeamState) -> dict:
     console.print(f"  [cyan]app:[/cyan] {plan.app_name} — {plan.summary}")
     for spec in plan.files:
         console.print(f"  [cyan]file:[/cyan] {spec.path} — {spec.description}")
-    return {"plan": plan}
+    
+    # Post the plan to the GitHub issue
+    body = format_plan_comment(plan_to_dict(plan), stage="Draft Plan")
+    with get_github_issue_tool() as tool:
+        tool.add_comment(issue_id, body)
+    
+    # The plan is transient context: the graph posts it to the GitHub issue
+    # and never writes it to the checkpoint.
+    return {}

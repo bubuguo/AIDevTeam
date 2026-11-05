@@ -13,7 +13,7 @@ import httpx
 from pydantic import BaseModel
 
 from aidevteam.config import get_settings
-from aidevteam.state import TeamState
+from aidevteam.state import Plan, TeamState
 
 # Model-typed TeamState fields, derived from the state definition so new
 # model fields work over RPC without touching this module.
@@ -23,13 +23,20 @@ _STATE_MODELS: dict[str, type[BaseModel]] = {
     if isinstance(ann, type) and issubclass(ann, BaseModel)
 }
 
+# The plan is transient context — it is never checkpointed — but it still
+# crosses the wire as a pydantic model, so it needs a decoder too.
+_AGENT_MODELS: dict[str, type[BaseModel]] = {**_STATE_MODELS, "plan": Plan}
+
 
 def encode_state(state: dict[str, Any]) -> dict[str, Any]:
     """Convert a state dict (pydantic model instances included) to JSON-safe values."""
     encoded: dict[str, Any] = {}
     for key, value in state.items():
-        model = _STATE_MODELS.get(key)
+        model = _AGENT_MODELS.get(key)
         if model is not None and isinstance(value, model):
+            encoded[key] = value.model_dump()
+        elif isinstance(value, BaseModel):
+            # Any other model still has to become JSON-safe.
             encoded[key] = value.model_dump()
         else:
             encoded[key] = value
@@ -40,7 +47,7 @@ def decode_update(update: dict[str, Any]) -> dict[str, Any]:
     """Convert a JSON state update back into a dict with pydantic model instances."""
     decoded: dict[str, Any] = {}
     for key, value in update.items():
-        model = _STATE_MODELS.get(key)
+        model = _AGENT_MODELS.get(key)
         if model is not None and value is not None:
             decoded[key] = model.model_validate(value)
         else:

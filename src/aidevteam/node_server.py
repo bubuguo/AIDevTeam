@@ -67,13 +67,13 @@ class _JobStore:
 
 
 def _job_id(role: str, decoded: dict[str, Any]) -> str:
-    """Greppable job id: <run_id>-<role>-<iteration>.
+    """Greppable job id: <issue_id>-<role>-<iteration>.
 
-    Unique within a run: the approval gate bumps iteration on every rejected
+    Unique within an issue: the approval gate bumps iteration on every rejected
     plan (and resets it on approval), so the planner can run several times
-    per run without colliding.
+    per issue without colliding.
     """
-    return f"{decoded['run_id']}-{role}-{decoded.get('iteration', 0)}"
+    return f"{decoded['issue_id']}-{role}-{decoded.get('iteration', 0)}"
 
 
 def create_app(role: str) -> FastAPI:
@@ -89,7 +89,7 @@ def create_app(role: str) -> FastAPI:
         try:
             update = node_func(decoded)
             store.finish(job_id, result=encode_state(update))
-        except Exception as exc:  # surface the failure through the job status
+        except Exception as exc:  # noqa: BLE001 - surface every node failure via job status
             store.finish(job_id, error=f"{type(exc).__name__}: {exc}")
 
     app = FastAPI(title=f"aidevteam-{role}")
@@ -106,9 +106,9 @@ def create_app(role: str) -> FastAPI:
             raise HTTPException(
                 status_code=422, detail=f"Invalid state payload: {exc}"
             ) from exc
-        if not decoded.get("run_id"):
-            # Every job must be tied to a pipeline run (the orchestrator seeds run_id).
-            raise HTTPException(status_code=422, detail="run_id is required")
+        if decoded.get("issue_id") is None:
+            # Every job must be tied to a GitHub issue (the orchestrator seeds issue_id).
+            raise HTTPException(status_code=422, detail="issue_id is required")
         job_id = _job_id(role, decoded)
         store.create(job_id)
         threading.Thread(target=_execute, args=(job_id, decoded), daemon=True).start()

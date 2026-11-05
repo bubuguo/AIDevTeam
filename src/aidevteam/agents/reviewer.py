@@ -3,6 +3,7 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
+from aidevteam.issuecontext import fetch_issue_context
 from aidevteam.llm import get_structured_llm
 from aidevteam.state import Review, TeamState
 
@@ -45,7 +46,12 @@ def _render_for_review(path: str, content: str) -> str:
 
 def reviewer(state: TeamState) -> dict:
     console.print("[bold magenta]▶ Reviewer[/bold magenta] evaluating the submission…")
-    plan = state["plan"]
+    issue_id = state["issue_id"]
+    context = fetch_issue_context(issue_id)
+    plan = context.plan
+    if plan is None:
+        raise RuntimeError(f"issue {issue_id} has no plan to review")
+
     code = state["code"]
     report = state["test_report"]
 
@@ -57,7 +63,7 @@ def reviewer(state: TeamState) -> dict:
             SystemMessage(content=REVIEWER_SYSTEM),
             HumanMessage(
                 content=(
-                    f"Task:\n{state['task']}\n\n"
+                    f"Task:\n{context.task}\n\n"
                     f"Plan ({plan.app_name}): {plan.summary}\n\n"
                     f"Implementation:\n{code_text}\n\n"
                     f"Test report: {report.summary}\n"
@@ -74,4 +80,4 @@ def reviewer(state: TeamState) -> dict:
         for item in review.feedback:
             console.print(f"    [red]-[/red] {item}")
 
-    return {"review": review, "approved": review.approved, "feedback": review.feedback}
+    return {"review": review, "approved": review.approved}

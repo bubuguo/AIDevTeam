@@ -5,6 +5,7 @@ import sys
 from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
+from aidevteam.issuecontext import fetch_issue_context
 from aidevteam.llm import get_structured_llm
 from aidevteam.state import TeamState, TestReport, TestSuite
 from aidevteam.workspace import run_command, workspace_for, write_files
@@ -26,8 +27,14 @@ Rules:
 
 def tester(state: TeamState) -> dict:
     console.print("[bold yellow]▶ Tester[/bold yellow] writing and running tests…")
-    workspace = workspace_for(state["run_id"])
-    plan = state["plan"]
+    issue_id = state["issue_id"]
+    workspace = workspace_for(issue_id)
+
+    context = fetch_issue_context(issue_id)
+    plan = context.plan
+    if plan is None:
+        raise RuntimeError(f"issue {issue_id} has no plan to test")
+
     code = state["code"]
 
     code_text = "\n\n".join(f"### {f.path}\n{f.content}" for f in code.files)
@@ -36,7 +43,7 @@ def tester(state: TeamState) -> dict:
             SystemMessage(content=TESTER_SYSTEM),
             HumanMessage(
                 content=(
-                    f"Task:\n{state['task']}\n\n"
+                    f"Task:\n{context.task}\n\n"
                     f"Plan ({plan.app_name}): {plan.summary}\n"
                     f"Example commands: {', '.join(plan.cli_commands) or 'n/a'}\n\n"
                     f"Implementation to test:\n{code_text}"

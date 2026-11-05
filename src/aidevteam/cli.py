@@ -2,15 +2,16 @@
 
 import typer
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from aidevteam.checkpoint import list_threads, persistent_checkpointer
 from aidevteam.config import get_settings
+from aidevteam.github_issue import GitHubIssueError, get_github_issue_tool
+from aidevteam.github_workflow import format_task_body
 from aidevteam.graph import build_graph
-from aidevteam.workspace import new_run_id, workspace_for
+from aidevteam.workspace import workspace_for
 
 app = typer.Typer(
     add_completion=False,
@@ -19,63 +20,33 @@ app = typer.Typer(
 console = Console()
 
 
-def _show_plan(plan: dict, revision: int = 0) -> None:
-    """Render a generated plan for the manual approval prompt."""
-    lines = [f"[bold]App:[/bold] {plan.get('app_name', '?')}", ""]
-    summary = plan.get("summary")
-    if summary:
-        lines.append(summary)
-        lines.append("")
-    commands = plan.get("cli_commands") or []
-    if commands:
-        lines.append("[bold]Example commands:[/bold]")
-        lines.extend(f"  • {command}" for command in commands)
-    lines.append("[bold]Files:[/bold]")
-    lines.extend(
-        f"  • {spec.get('path')} — {spec.get('description')}"
-        for spec in plan.get("files") or []
-    )
-    console.print(
-        Panel(
-            "\n".join(lines),
-            title="plan approval",
-            subtitle=f"revision {revision}" if revision else "first draft",
-            border_style="magenta",
-        )
-    )
+def _create_github_issue(task: str) -> int:
+    """Create a GitHub issue and return its number as the canonical issue ID.
 
-
-def _approval_loop(graph, config: dict, state: dict) -> dict:
-    """Drive the plan-approval gate until the run leaves it.
-
-    The gate interrupts after every (re)generated plan until approved; empty
-    rejection feedback aborts the run. Shared by `run` and `resume` so both
-    behave identically.
+    A GitHub issue is required because its number is the only identifier used
+    for the workflow thread, workspace, and node jobs. The issue body carries
+    the task in the versioned workflow format, so a later ``resume`` can
+    rebuild the run's context from the issue alone.
     """
-    while state.get("__interrupt__"):
-        payload = state["__interrupt__"][0].value or {}
-        _show_plan(payload.get("plan") or {}, payload.get("revision", 0))
-        if typer.confirm("Approve this plan?"):
-            resume = {"approved": True, "feedback": ""}
-        else:
-            feedback = typer.prompt(
-                "What should the Planner change? (empty input aborts)", default=""
-            ).strip()
-            if not feedback:
-                console.print(
-                    "[bold red]✘ run aborted — plan rejected without feedback[/bold red]"
-                )
-                raise typer.Exit(code=1)
-            resume = {"approved": False, "feedback": feedback}
-        state = graph.invoke(Command(resume=resume), config)
-    return state
+    settings = get_settings()
+    if not settings.github_token or not settings.github_owner or not settings.github_repo:
+        raise GitHubIssueError(
+            "GitHub issue tracking is required; set GITHUB_TOKEN, GITHUB_OWNER, "
+            "and GITHUB_REPO"
+        )
+
+    title = f"{task[:60]}..." if len(task) > 60 else task
+    body = format_task_body(task)
+    with get_github_issue_tool() as tool:
+        issue = tool.create_issue(title, body)
+        return issue.number
 
 
-def _render_result(state: dict, run_id: str) -> None:
+def _render_result(state: dict, issue_id: int) -> None:
     """Print the final pipeline result panel."""
     review = state.get("review")
     report = state.get("test_report")
-    workspace = str(workspace_for(run_id))
+    workspace = str(workspace_for(issue_id))
     code = state.get("code")
 
     if review and review.approved:
@@ -86,6 +57,7 @@ def _render_result(state: dict, run_id: str) -> None:
         status = "[bold red]✘ pipeline ended early[/bold red]"
 
     lines = [status, ""]
+    lines.append(f"[bold]Issue:[/bold] #{issue_id}")
     if workspace:
         lines.append(f"[bold]Workspace:[/bold] {workspace}")
     if code:
@@ -100,26 +72,13 @@ def _render_result(state: dict, run_id: str) -> None:
     console.print(Panel("\n".join(lines), title="result", border_style="cyan"))
 
 
-def _plan_app_name(plan) -> str:
-    """The app name of a plan, whether it is a model instance or a plain dict."""
-    if isinstance(plan, dict):
-        return str(plan.get("app_name") or "")
-    return str(getattr(plan, "app_name", "") or "")
-
-
 def _run_status(snapshot) -> str:
     """Human-readable status of a stored run."""
-    if snapshot.interrupts:
+    if snapshot.next and "approve_plan" in snapshot.next:
         return "[yellow]awaiting approval[/yellow]"
     if snapshot.next:
         return "[cyan]paused[/cyan]"
     return "[green]finished[/green]"
-
-
-def _truncate(text: str | None, width: int) -> str:
-    """One-line, width-limited text for table cells."""
-    flat = (text or "").replace("\n", " ").strip()
-    return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 
 def _format_timestamp(timestamp: str) -> str:
@@ -133,46 +92,53 @@ def run(
         ..., help="Natural-language description of the CLI app to build."
     ),
 ) -> None:
-    """Build a Python CLI app from TASK using the agent pipeline."""
-    settings = get_settings()
-    run_id = new_run_id()
+    """Build a Python CLI app from TASK using the agent pipeline.
 
+    The task becomes a GitHub issue; the plan is posted as a comment on that
+    issue and the run waits there for a human to comment ``/approve`` or
+    ``/reject <reason>``.
+    """
+    try:
+        issue_id = _create_github_issue(task)
+    except GitHubIssueError as exc:
+        console.print(f"[bold red]✘ GitHub operation failed: {exc}[/bold red]")
+        raise typer.Exit(code=1) from exc
+    
+    settings = get_settings()
     console.print(
         Panel(
             f"[bold]{task}[/bold]",
             title="aidevteam",
-            subtitle=f"run={run_id} · endpoint={settings.host} · model={settings.resolved_model}",
+            subtitle=f"issue={issue_id} · endpoint={settings.host} · model={settings.resolved_model}",
         )
     )
 
-    # Every task plan must be approved by a human.
-    # Resuming an interrupt needs the same thread (thread_id=run_id) + checkpointer.
-    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}
+    # Every task plan must be approved by a human, on the GitHub issue.
+    # Resuming needs the same thread (thread_id=issue_id) + checkpointer.
+    config = {"configurable": {"thread_id": str(issue_id)}, "recursion_limit": 60}
     with persistent_checkpointer() as saver:
         graph = build_graph(checkpointer=saver)
-        state: dict = graph.invoke(
-            {
-                "task": task,
-                "run_id": run_id,
-                "iteration": 0,
-            },
-            config,
-        )
-        state = _approval_loop(graph, config, state)
+        payload: dict = {
+            "issue_id": issue_id,
+            "iteration": 0,
+        }
+        state: dict = graph.invoke(payload, config)
 
-    _render_result(state, run_id)
+    _render_result(state, issue_id)
 
 
 @app.command()
 def resume(
-    run_id: str = typer.Argument(..., help="Run id of the paused run to resume."),
+    issue_id: int = typer.Argument(..., help="GitHub issue ID of the paused run to resume."),
 ) -> None:
     """Resume a paused run from the persistent checkpoint store.
 
-    The run id is the thread id shown by `list` (and in the `run` header).
+    The GitHub issue ID is the thread ID shown by `list` (and in the `run` header).
+    The run picks up where it stopped: if it was waiting for a plan decision,
+    it waits for the next ``/approve`` or ``/reject`` comment on the issue; if
+    it died inside a node, that node runs again.
     """
-    settings = get_settings()
-    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 60}
+    config = {"configurable": {"thread_id": str(issue_id)}, "recursion_limit": 60}
 
     with persistent_checkpointer() as saver:
         # Every task plan must be approved by a human.
@@ -180,65 +146,69 @@ def resume(
         snapshot = graph.get_state(config)
         values = snapshot.values or {}
         if not values:
-            console.print(f"[bold red]✘ unknown run: {run_id}[/bold red]")
+            console.print(f"[bold red]✘ unknown issue: {issue_id}[/bold red]")
+            raise typer.Exit(code=1)
+
+        stored_issue_id = values.get("issue_id")
+        if stored_issue_id != issue_id:
+            console.print(
+                f"[bold red]✘ checkpoint for issue {issue_id} is incompatible: "
+                "missing or mismatched issue_id[/bold red]"
+            )
             raise typer.Exit(code=1)
 
         console.print(
             Panel(
-                f"[bold]{values.get('task', '')}[/bold]",
+                f"[bold]issue #{issue_id}[/bold]",
                 title="aidevteam resume",
-                subtitle=f"run={run_id} · paused at {', '.join(snapshot.next) or 'end'}",
+                subtitle=f"paused at {', '.join(snapshot.next) or 'end'}",
             )
         )
 
-        if snapshot.interrupts:
-            # A pending approval: the interrupt payload carries the plan.
-            state = _approval_loop(
-                graph, config, {"__interrupt__": list(snapshot.interrupts)}
-            )
-        elif snapshot.next:
+        if not snapshot.next:
+            console.print(f"[bold]issue {issue_id} has already finished[/bold]")
+            _render_result(values, issue_id)
+            return
+
+        if "approve_plan" not in snapshot.next:
             # Interrupted mid-pipeline (e.g. the process died): LangGraph
             # re-runs the unfinished node, whose side effects are not
             # idempotent — hence the warning.
             console.print(
                 "[bold yellow]run paused mid-pipeline — the unfinished node runs again[/bold yellow]"
             )
-            state = _approval_loop(graph, config, graph.invoke(None, config))
-        else:
-            console.print(f"[bold]run {run_id} has already finished[/bold]")
-            _render_result(values, run_id)
-            return
 
-    _render_result(state, run_id)
+        state = graph.invoke(None, config)
+
+    _render_result(state, issue_id)
 
 
 @app.command("list")
 def list_runs(
-    limit: int = typer.Option(20, "--limit", help="Maximum number of runs to list."),
+    limit: int = typer.Option(20, "--limit", help="Maximum number of issues to list."),
 ) -> None:
-    """List the runs stored in the persistent checkpoint store."""
+    """List the issues stored in the persistent checkpoint store."""
     with persistent_checkpointer() as saver:
         threads = list_threads(saver)
         if not threads:
-            console.print("[bold]no runs recorded yet[/bold]")
+            console.print("[bold]no issues recorded yet[/bold]")
             return
 
         # get_state() only reads the checkpoint, so the gate mode is irrelevant.
         graph = build_graph(checkpointer=saver)
-        table = Table(title="runs")
-        table.add_column("run id", style="bold")
-        table.add_column("app")
-        table.add_column("task")
+        table = Table(title="issues")
+        table.add_column("issue id", style="bold")
         table.add_column("status")
         table.add_column("updated")
 
         for thread_id, updated_at in threads[:limit]:
             snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
             values = snapshot.values or {}
+            stored_issue_id = values.get("issue_id")
+            if str(stored_issue_id) != thread_id:
+                continue
             table.add_row(
                 thread_id,
-                _plan_app_name(values.get("plan")) or "-",
-                _truncate(values.get("task"), 40),
                 _run_status(snapshot),
                 _format_timestamp(updated_at),
             )
