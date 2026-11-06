@@ -26,18 +26,15 @@ Rules:
 
 def coder(state: TeamState) -> dict:
     settings = get_settings()
-    iteration = state.get("iteration", 0) + 1
     # The reviewer's feedback is checkpointed as part of the review verdict,
     # so it survives a restart without being duplicated in the state.
     review = state.get("review")
     feedback = list(review.feedback) if review is not None else []
 
-    if iteration == 1:
-        console.print("[bold green]▶ Coder[/bold green] implementing the plan…")
-    else:
-        console.print(
-            f"[bold green]▶ Coder[/bold green] revision {iteration}/{settings.max_iterations}…"
-        )
+    console.print(
+        f"[bold green]▶ Coder[/bold green] implementing the plan "
+        f"{state.get('iteration', 0) + 1}/{settings.max_iterations}…"
+    )
 
     issue_id = state["issue_id"]
     workspace = create_workspace(issue_id)
@@ -75,5 +72,4 @@ def coder(state: TeamState) -> dict:
 
     return {
         "code": result,
-        "iteration": iteration,
     }

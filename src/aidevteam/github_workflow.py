@@ -21,9 +21,9 @@ Three kinds of payload exist:
     **App:** word-count
     ...
 
-**Decision comment** — a human approving or rejecting a plan. The natural
-form is a slash command; the versioned marker is what the team writes back
-to record that the decision was consumed::
+**Decision comment** — a human approving or rejecting a plan, written as a
+slash command. The versioned marker form is recognized too, so a
+machine-written decision parses the same way::
 
     /approve
     /reject please add an edge case for empty input
@@ -139,30 +139,11 @@ def format_plan_comment(plan: dict[str, Any], stage: str = "Draft Plan") -> str:
     )
     lines.append("")
     lines.append("```json")
-    lines.append(json.dumps(plan, indent=2, default=str))
+    lines.append(json.dumps(plan, indent=2, default=str, ensure_ascii=False))
     lines.append("```")
     lines.append("")
     lines.append(marker("plan"))
     return "\n".join(lines)
-
-
-def format_decision_comment(action: str, feedback: str = "") -> str:
-    """Format a decision as a versioned GitHub comment.
-
-    Used to record that a decision was consumed, so a later ``resume`` does
-    not replay it.
-
-    Args:
-        action: ``approve`` or ``reject``.
-        feedback: The rejection feedback, if any.
-
-    Returns:
-        The comment body, carrying the decision marker.
-    """
-    body = f"{marker('decision', action)}\n\n/{action}"
-    if feedback:
-        body += f" {feedback}"
-    return body
 
 
 def parse_workflow_comment(body: str) -> dict[str, Any] | None:

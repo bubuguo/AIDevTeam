@@ -2,6 +2,7 @@
 
 import typer
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command, StateSnapshot
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -9,8 +10,9 @@ from rich.table import Table
 from aidevteam.checkpoint import list_threads, persistent_checkpointer
 from aidevteam.config import get_settings
 from aidevteam.github_issue import GitHubIssueError, get_github_issue_tool
-from aidevteam.github_workflow import format_task_body
+from aidevteam.github_workflow import parse_task_body
 from aidevteam.graph import build_graph
+from aidevteam.issuecontext import fetch_issue_context
 from aidevteam.workspace import workspace_for
 
 app = typer.Typer(
@@ -20,26 +22,28 @@ app = typer.Typer(
 console = Console()
 
 
-def _create_github_issue(task: str) -> int:
-    """Create a GitHub issue and return its number as the canonical issue ID.
+def _validate_issue_for_run(issue_id: int) -> str:
+    """Return the task text of an existing, open GitHub issue.
 
-    A GitHub issue is required because its number is the only identifier used
-    for the workflow thread, workspace, and node jobs. The issue body carries
-    the task in the versioned workflow format, so a later ``resume`` can
-    rebuild the run's context from the issue alone.
+    Every run starts from an issue a human opened on GitHub; the CLI never
+    creates issues. The issue must exist, be open, and carry a non-empty
+    task in its body (plain text is enough — the versioned workflow marker
+    is optional, see github_workflow.parse_task_body).
     """
-    settings = get_settings()
-    if not settings.github_token or not settings.github_owner or not settings.github_repo:
-        raise GitHubIssueError(
-            "GitHub issue tracking is required; set GITHUB_TOKEN, GITHUB_OWNER, "
-            "and GITHUB_REPO"
-        )
-
-    title = f"{task[:60]}..." if len(task) > 60 else task
-    body = format_task_body(task)
     with get_github_issue_tool() as tool:
-        issue = tool.create_issue(title, body)
-        return issue.number
+        try:
+            issue = tool.get_issue(issue_id)
+        except GitHubIssueError as exc:
+            raise GitHubIssueError(f"issue {issue_id} is not readable: {exc}") from exc
+    if issue.state != "open":
+        raise GitHubIssueError(f"issue {issue_id} is {issue.state}, not open")
+    task = parse_task_body(issue.body or "")
+    if not task:
+        raise GitHubIssueError(
+            f"issue {issue_id} has no task text in its body — describe the "
+            "CLI app to build in the issue body"
+        )
+    return task
 
 
 def _render_result(state: dict, issue_id: int) -> None:
@@ -72,9 +76,40 @@ def _render_result(state: dict, issue_id: int) -> None:
     console.print(Panel("\n".join(lines), title="result", border_style="cyan"))
 
 
-def _run_status(snapshot) -> str:
+def _pending_interrupt(snapshot: StateSnapshot) -> dict | None:
+    """The payload of a pending approval interrupt, if the run waits at the gate.
+
+    The gate interrupts with ``{"issue_id": ..., "plan_comment_id": ...}``
+    (see graph.approve_plan); any other pending state is not an approval
+    wait.
+    """
+    for task in snapshot.tasks or ():
+        for intr in getattr(task, "interrupts", None) or ():
+            value = getattr(intr, "value", None)
+            if isinstance(value, dict) and "plan_comment_id" in value:
+                return value
+    return None
+
+
+def _decision_from_issue(issue_id: int, payload: dict) -> dict | None:
+    """Read the human's decision for a pending approval from the issue.
+
+    Only a decision posted *after* the plan comment recorded in the
+    interrupt payload counts, so a verdict on an older draft is never
+    replayed. Returns ``None`` while no decision has been posted yet.
+    """
+    context = fetch_issue_context(int(issue_id))
+    decision = context.decision_after(payload["plan_comment_id"])
+    if decision is None:
+        return None
+    if decision.get("action") == "approve":
+        return {"action": "approve"}
+    return {"action": "reject", "feedback": str(decision.get("feedback") or "")}
+
+
+def _run_status(snapshot: StateSnapshot) -> str:
     """Human-readable status of a stored run."""
-    if snapshot.next and "approve_plan" in snapshot.next:
+    if _pending_interrupt(snapshot):
         return "[yellow]awaiting approval[/yellow]"
     if snapshot.next:
         return "[cyan]paused[/cyan]"
@@ -88,20 +123,23 @@ def _format_timestamp(timestamp: str) -> str:
 
 @app.command()
 def run(
-    task: str = typer.Argument(
-        ..., help="Natural-language description of the CLI app to build."
+    issue_id: int = typer.Argument(
+        ..., help="GitHub issue number (opened by a human) whose body describes the app to build."
     ),
 ) -> None:
-    """Build a Python CLI app from TASK using the agent pipeline.
+    """Build a Python CLI app from an existing GitHub issue.
 
-    The task becomes a GitHub issue; the plan is posted as a comment on that
-    issue and the run waits there for a human to comment ``/approve`` or
-    ``/reject <reason>``.
+    All new requests come from GitHub issues: open an issue whose body
+    describes the CLI app, then start the pipeline with this command. The
+    plan is posted as a comment on that issue and the run pauses there
+    (LangGraph interrupt), so this command returns as soon as the plan is
+    up. Comment ``/approve`` or ``/reject <reason>`` on the issue, then run
+    ``aidevteam resume <issue>`` to continue.
     """
     try:
-        issue_id = _create_github_issue(task)
+        task = _validate_issue_for_run(issue_id)
     except GitHubIssueError as exc:
-        console.print(f"[bold red]✘ GitHub operation failed: {exc}[/bold red]")
+        console.print(f"[bold red]✘ cannot start issue {issue_id}: {exc}[/bold red]")
         raise typer.Exit(code=1) from exc
     
     settings = get_settings()
@@ -118,11 +156,38 @@ def run(
     config = {"configurable": {"thread_id": str(issue_id)}, "recursion_limit": 60}
     with persistent_checkpointer() as saver:
         graph = build_graph(checkpointer=saver)
+        # Refuse a second pipeline on the same issue: the checkpoint thread
+        # already exists, so this run was started before — resume it instead.
+        existing = graph.get_state(config)
+        if existing.values:
+            console.print(
+                f"[bold red]✘ issue {issue_id} already has a run "
+                f"({_run_status(existing).strip()}) — use "
+                f"`aidevteam resume {issue_id}` instead[/bold red]"
+            )
+            raise typer.Exit(code=1)
         payload: dict = {
             "issue_id": issue_id,
             "iteration": 0,
         }
-        state: dict = graph.invoke(payload, config)
+        try:
+            state: dict = graph.invoke(payload, config)
+        except (GitHubIssueError, RuntimeError) as exc:
+            # e.g. a node job failed, or the issue is unreadable.
+            console.print(f"[bold red]✘ pipeline failed: {exc}[/bold red]")
+            raise typer.Exit(code=1) from exc
+
+    if state.get("__interrupt__"):
+        # The approval gate paused the run: the plan is posted and the
+        # checkpoint holds the pending interrupt. Nothing is polling —
+        # the human's decision (and a resume) continues the run.
+        console.print(
+            f"[bold magenta]⏸ plan posted on issue #{issue_id} — "
+            "waiting for approval[/bold magenta]\n"
+            "Comment `/approve` or `/reject <reason>` on the issue, then run:\n"
+            f"  aidevteam resume {issue_id}"
+        )
+        return
 
     _render_result(state, issue_id)
 
@@ -134,9 +199,10 @@ def resume(
     """Resume a paused run from the persistent checkpoint store.
 
     The GitHub issue ID is the thread ID shown by `list` (and in the `run` header).
-    The run picks up where it stopped: if it was waiting for a plan decision,
-    it waits for the next ``/approve`` or ``/reject`` comment on the issue; if
-    it died inside a node, that node runs again.
+    The run picks up where it stopped: if it is waiting for a plan decision,
+    the newest ``/approve`` or ``/reject`` comment on the issue (posted after
+    the latest plan) is supplied to the graph; if it died inside a node, that
+    node runs again.
     """
     config = {"configurable": {"thread_id": str(issue_id)}, "recursion_limit": 60}
 
@@ -170,15 +236,52 @@ def resume(
             _render_result(values, issue_id)
             return
 
-        if "approve_plan" not in snapshot.next:
+        pending = _pending_interrupt(snapshot)
+        if pending is not None:
+            # The run waits at the approval gate: read the human's decision
+            # from the issue and hand it to the graph. Nothing is polled —
+            # with no decision yet there is simply nothing to resume.
+            try:
+                decision = _decision_from_issue(issue_id, pending)
+            except GitHubIssueError as exc:
+                console.print(f"[bold red]✘ resume failed: {exc}[/bold red]")
+                raise typer.Exit(code=1) from exc
+            if decision is None:
+                console.print(
+                    f"[bold yellow]no `/approve` or `/reject` comment after the "
+                    f"latest plan on issue {issue_id} yet — nothing to resume[/bold yellow]"
+                )
+                return
+            # The verdict itself is announced by the gate node when it
+            # records the decision — no duplicate message here.
+            try:
+                state = graph.invoke(Command(resume=decision), config)
+            except (GitHubIssueError, RuntimeError) as exc:
+                console.print(f"[bold red]✘ resume failed: {exc}[/bold red]")
+                raise typer.Exit(code=1) from exc
+        else:
             # Interrupted mid-pipeline (e.g. the process died): LangGraph
             # re-runs the unfinished node, whose side effects are not
             # idempotent — hence the warning.
             console.print(
                 "[bold yellow]run paused mid-pipeline — the unfinished node runs again[/bold yellow]"
             )
+            try:
+                state = graph.invoke(None, config)
+            except (GitHubIssueError, RuntimeError) as exc:
+                console.print(f"[bold red]✘ resume failed: {exc}[/bold red]")
+                raise typer.Exit(code=1) from exc
 
-        state = graph.invoke(None, config)
+    if state.get("__interrupt__"):
+        # A rejection loops back to the planner, which posts a revised plan
+        # and pauses at the gate again — that's a healthy pause, not an error.
+        console.print(
+            f"[bold magenta]⏸ revised plan posted on issue #{issue_id} — "
+            "waiting for approval[/bold magenta]\n"
+            "Comment `/approve` or `/reject <reason>` on the issue, then run:\n"
+            f"  aidevteam resume {issue_id}"
+        )
+        return
 
     _render_result(state, issue_id)
 

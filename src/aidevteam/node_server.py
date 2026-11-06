@@ -40,8 +40,18 @@ class _JobStore:
         self._lock = threading.Lock()
         self._keep = keep
 
-    def create(self, job_id: str) -> str:
+    def create(self, job_id: str) -> bool:
+        """Register a new job; False when the same job is still running.
+
+        A finished job (done/error) may be re-run — resuming a crashed run
+        intentionally re-executes the unfinished node. A *running* job must
+        never be silently replaced: node side effects are not idempotent,
+        and two threads racing on finish() would corrupt the result.
+        """
         with self._lock:
+            existing = self._jobs.get(job_id)
+            if existing is not None and existing.status == "running":
+                return False
             self._jobs[job_id] = _Job()
             # Bound memory: drop the oldest finished jobs when over capacity.
             while len(self._jobs) > self._keep:
@@ -110,7 +120,16 @@ def create_app(role: str) -> FastAPI:
             # Every job must be tied to a GitHub issue (the orchestrator seeds issue_id).
             raise HTTPException(status_code=422, detail="issue_id is required")
         job_id = _job_id(role, decoded)
-        store.create(job_id)
+        if not store.create(job_id):
+            # The same job is still executing: never re-run it (side effects
+            # are not idempotent) — surface the conflict to the orchestrator.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Job {job_id} is already running — a previous attempt "
+                    "may still be executing"
+                ),
+            )
         threading.Thread(target=_execute, args=(job_id, decoded), daemon=True).start()
         return {"job_id": job_id}
 

@@ -113,3 +113,134 @@ def test_call_node_raises_on_job_error_without_reexecution(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"bad plan.*podman logs aidevteam_reviewer_1"):
         call_node("reviewer", {"task": "t"})
+
+
+def test_call_node_poll_tolerates_server_errors(monkeypatch):
+    """A 5xx blip while polling (proxy hiccup, node restart) is retried
+    until the deadline, not fatal."""
+
+    def fake_post(url, json=None, timeout=None):
+        return _fake_response("POST", url, {"job_id": "job-5"})
+
+    calls = {"get": 0}
+
+    def fake_get(url, timeout=None):
+        calls["get"] += 1
+        if calls["get"] == 1:
+            return httpx.Response(503, request=httpx.Request("GET", url))
+        return _fake_response("GET", url, {"status": "done", "result": {"iteration": 1}})
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+    monkeypatch.setattr("aidevteam.rpc.httpx.get", fake_get)
+    monkeypatch.setattr("aidevteam.rpc.time.sleep", lambda _s: None)
+
+    update = call_node("coder", {"issue_id": 1})
+    assert calls["get"] == 2
+    assert update["iteration"] == 1
+
+
+def test_call_node_poll_fails_fast_on_client_error(monkeypatch):
+    """A 4xx while polling means the job is really gone (e.g. the node lost
+    its job store) — raise immediately instead of waiting out the deadline."""
+
+    def fake_post(url, json=None, timeout=None):
+        return _fake_response("POST", url, {"job_id": "job-6"})
+
+    def fake_get(url, timeout=None):
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+    monkeypatch.setattr("aidevteam.rpc.httpx.get", fake_get)
+    monkeypatch.setattr("aidevteam.rpc.time.sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="lost while polling"):
+        call_node("coder", {"issue_id": 1})
+
+
+def test_call_node_retries_server_errors_on_submit(monkeypatch):
+    """A 5xx while submitting (node still booting behind a proxy) is retried
+    within the grace window instead of escaping as a raw httpx error."""
+    calls = {"post": 0}
+
+    def fake_post(url, json=None, timeout=None):
+        calls["post"] += 1
+        if calls["post"] == 1:
+            return httpx.Response(503, request=httpx.Request("POST", url))
+        return _fake_response("POST", url, {"job_id": "job-7"})
+
+    def fake_get(url, timeout=None):
+        return _fake_response("GET", url, {"status": "done", "result": {}})
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+    monkeypatch.setattr("aidevteam.rpc.httpx.get", fake_get)
+    monkeypatch.setattr("aidevteam.rpc.time.sleep", lambda _s: None)
+
+    update = call_node("coder", {"issue_id": 1})
+    assert calls["post"] == 2
+    assert update == {}
+
+
+def test_call_node_fails_fast_on_client_error_on_submit(monkeypatch):
+    """A 4xx on submit means the request itself is wrong — no retry, and the
+    error is a RuntimeError the CLI can report."""
+
+    def fake_post(url, json=None, timeout=None):
+        return httpx.Response(422, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+
+    with pytest.raises(RuntimeError, match="rejected the job submission"):
+        call_node("coder", {"issue_id": 1})
+
+
+def test_call_node_reports_a_missing_job_id(monkeypatch):
+    """A 200 without a job id is a hard error, not a silent hang."""
+
+    def fake_post(url, json=None, timeout=None):
+        return _fake_response("POST", url, {"unexpected": "shape"})
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+
+    with pytest.raises(RuntimeError, match="no job id"):
+        call_node("coder", {"issue_id": 1})
+
+
+def test_call_node_poll_tolerates_non_json_responses(monkeypatch):
+    """A proxy answering with an HTML error page must not crash the poll —
+    it is retried like any other transient failure."""
+
+    def fake_post(url, json=None, timeout=None):
+        return _fake_response("POST", url, {"job_id": "job-8"})
+
+    calls = {"get": 0}
+
+    def fake_get(url, timeout=None):
+        calls["get"] += 1
+        if calls["get"] == 1:
+            return httpx.Response(
+                200,
+                text="<html>gateway error</html>",
+                request=httpx.Request("GET", url),
+            )
+        return _fake_response("GET", url, {"status": "done", "result": {"iteration": 3}})
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+    monkeypatch.setattr("aidevteam.rpc.httpx.get", fake_get)
+    monkeypatch.setattr("aidevteam.rpc.time.sleep", lambda _s: None)
+
+    update = call_node("coder", {"issue_id": 1})
+    assert calls["get"] == 2
+    assert update["iteration"] == 3
+
+
+def test_call_node_fails_fast_when_the_job_is_already_running(monkeypatch):
+    """A 409 means the same job is still executing on the node — never
+    re-execute it; surface the conflict instead."""
+
+    def fake_post(url, json=None, timeout=None):
+        return httpx.Response(409, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("aidevteam.rpc.httpx.post", fake_post)
+
+    with pytest.raises(RuntimeError, match="already running"):
+        call_node("coder", {"issue_id": 1})

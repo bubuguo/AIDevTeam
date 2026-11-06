@@ -30,17 +30,12 @@ _AGENT_MODELS: dict[str, type[BaseModel]] = {**_STATE_MODELS, "plan": Plan}
 
 def encode_state(state: dict[str, Any]) -> dict[str, Any]:
     """Convert a state dict (pydantic model instances included) to JSON-safe values."""
-    encoded: dict[str, Any] = {}
-    for key, value in state.items():
-        model = _AGENT_MODELS.get(key)
-        if model is not None and isinstance(value, model):
-            encoded[key] = value.model_dump()
-        elif isinstance(value, BaseModel):
-            # Any other model still has to become JSON-safe.
-            encoded[key] = value.model_dump()
-        else:
-            encoded[key] = value
-    return encoded
+    # Every pydantic model must become JSON-safe, whether or not it is a
+    # known state model.
+    return {
+        key: value.model_dump() if isinstance(value, BaseModel) else value
+        for key, value in state.items()
+    }
 
 
 def decode_update(update: dict[str, Any]) -> dict[str, Any]:
@@ -68,13 +63,36 @@ def call_node(role: str, state: dict[str, Any]) -> dict[str, Any]:
     submit_deadline = time.monotonic() + settings.node_connect_grace
 
     # Submit the job, retrying while the container is still starting up.
+    # Transport errors and 5xx (node still booting, proxy hiccup) are
+    # retried within the grace window; a 4xx means the request itself is
+    # wrong — retrying cannot help, so fail fast.
     while True:
         try:
             response = httpx.post(f"{base}/run", json=payload, timeout=30.0)
             response.raise_for_status()
-            job_id = response.json()["job_id"]
+            try:
+                job_id = response.json()["job_id"]
+            except (ValueError, KeyError) as exc:
+                raise RuntimeError(
+                    f"Node {role!r} returned no job id from {base}/run "
+                    f"(HTTP {response.status_code})"
+                ) from exc
             break
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        except httpx.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 409:
+                # The node refused a duplicate submission: the same job is
+                # still running there. Never re-execute it (side effects are
+                # not idempotent) — surface the conflict instead.
+                raise RuntimeError(
+                    f"Node {role!r} job is already running at {base} — a "
+                    "previous attempt may still be executing"
+                ) from exc
+            if status is not None and 400 <= status < 500:
+                raise RuntimeError(
+                    f"Node service {role!r} rejected the job submission "
+                    f"(HTTP {status}) at {base}/run: {exc}"
+                ) from exc
             if time.monotonic() >= submit_deadline:
                 raise RuntimeError(
                     f"Node service {role!r} unreachable at {base} "
@@ -89,9 +107,15 @@ def call_node(role: str, state: dict[str, Any]) -> dict[str, Any]:
             response = httpx.get(f"{base}/jobs/{job_id}", timeout=30.0)
             response.raise_for_status()
             body = response.json()
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            # Transient blip while polling — keep waiting until the deadline.
-            if time.monotonic() >= poll_deadline:
+        except (httpx.HTTPError, ValueError) as exc:
+            # Transport blips, 5xx (proxy hiccups, node restarts) and
+            # non-JSON bodies (e.g. an HTML error page) are transient —
+            # keep waiting until the deadline. A 4xx means the job is
+            # really gone (e.g. the node lost its job store): fail fast.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if (status is not None and 400 <= status < 500) or (
+                time.monotonic() >= poll_deadline
+            ):
                 raise RuntimeError(
                     f"Node {role!r} job {job_id} lost while polling: {exc}"
                 ) from exc

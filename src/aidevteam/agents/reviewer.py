@@ -80,4 +80,8 @@ def reviewer(state: TeamState) -> dict:
         for item in review.feedback:
             console.print(f"    [red]-[/red] {item}")
 
-    return {"review": review, "approved": review.approved}
+    return {
+        "review": review, 
+        "approved": review.approved, 
+        "iteration": state.get("iteration", 0) + 1,
+    }

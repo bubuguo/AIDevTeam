@@ -13,7 +13,6 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from aidevteam.config import get_settings
-from aidevteam.github_workflow import parse_workflow_comment
 
 
 class GitHubIssueError(RuntimeError):
@@ -364,43 +363,11 @@ class GitHubIssueTool:
             if len(batch) < per_page:
                 break
             page += 1
+        # The workflow's replay safety (decision_after / plan_feedback in
+        # issuecontext.py) depends on oldest-first ordering — enforce it
+        # instead of trusting the API's default sort.
+        comments.sort(key=lambda comment: (comment.created_at, comment.id))
         return comments
-
-    def get_workflow_decision(
-        self,
-        issue_number: int,
-        after_comment_id: int = 0,
-    ) -> dict[str, Any] | None:
-        """Find the newest ``/approve`` or ``/reject`` decision on an issue.
-
-        Only comments created after ``after_comment_id`` are considered, so a
-        decision that was already consumed is never replayed. The newest
-        matching decision wins.
-
-        Args:
-            issue_number: Number of the issue.
-            after_comment_id: Ignore comments with an ID at or below this value.
-
-        Returns:
-            ``{"action": "approve"|"reject", "feedback": str, "comment_id": int}``
-            or None when no decision was found.
-        """
-        decision: dict[str, Any] | None = None
-        for comment in self.get_issue_comments(issue_number):
-            if comment.id <= after_comment_id:
-                continue
-            parsed = parse_workflow_comment(comment.body)
-            if not parsed or parsed.get("kind") != "decision":
-                continue
-            action = str(parsed.get("action") or "").strip().lower()
-            if action not in ("approve", "reject"):
-                continue
-            decision = {
-                "action": action,
-                "feedback": str(parsed.get("feedback") or ""),
-                "comment_id": comment.id,
-            }
-        return decision
 
     def get_sub_issues(self, label: str = "sub-issue") -> list[Issue]:
         """Get all sub-issues in the repository.

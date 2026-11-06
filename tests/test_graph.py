@@ -2,6 +2,8 @@
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from aidevteam.graph import (
     _remote_node,
@@ -10,6 +12,8 @@ from aidevteam.graph import (
     approve_plan,
     build_graph,
 )
+from aidevteam.issuecontext import IssueContext
+from aidevteam.state import Plan, TeamState
 
 # The agents wired into build_graph (explicit add_node calls).
 WIRED_AGENTS = ("planner", "coder", "tester", "reviewer")
@@ -36,8 +40,8 @@ def test_plan_approval_gate_is_wired_by_default():
 
 
 def test_graph_always_has_checkpointer():
-    """The gate needs it for interrupt()/resume; plain runs get inspectable
-    state (get_state / state history) for free."""
+    """The gate needs it to poll the issue across restarts; plain runs get
+    inspectable state (get_state / state history) for free."""
     assert build_graph(checkpointer=MemorySaver()).checkpointer is not None
 
 
@@ -62,58 +66,107 @@ def test_review_routing_still_ends_on_approval():
     assert _route_after_review({"approved": False, "iteration": 0}) == "coder"
 
 
-def test_approve_plan_accumulates_rejection_feedback(monkeypatch):
+def _gate_graph():
+    """Compile just the approval gate so interrupt()/resume can be exercised."""
+    graph = StateGraph(TeamState)
+    graph.add_node("approve_plan", approve_plan)
+    graph.add_edge(START, "approve_plan")
+    graph.add_edge("approve_plan", END)
+    return graph.compile(checkpointer=MemorySaver())
+
+
+def _config(thread_id: str = "12345"):
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def _issue_context(decisions=(), plan_comment_id: int = 1, with_plan: bool = True):
+    """An IssueContext as fetch_issue_context would build it from the issue."""
+    return IssueContext(
+        issue_id=12345,
+        task="build a demo",
+        plan=Plan(app_name="demo", summary="demo app", files=[]) if with_plan else None,
+        plan_comment_id=plan_comment_id,
+        decisions=list(decisions),
+    )
+
+
+def test_approve_plan_interrupts_with_the_plan_comment_id(monkeypatch):
+    """The gate pauses the run and records where the decision must appear:
+    the interrupt payload carries the issue and the latest plan comment."""
+    context = _issue_context()
     monkeypatch.setattr(
-        "aidevteam.graph.interrupt",
-        lambda payload: {"approved": False, "feedback": "too many files"},
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
     )
-    update = approve_plan(
-        {"plan": None, "plan_feedback": ["smaller scope"], "iteration": 1}
-    )
-    assert update["plan_approved"] is False
-    assert update["plan_feedback"] == ["smaller scope", "too many files"]
-    assert update["iteration"] == 2
+    result = _gate_graph().invoke({"issue_id": 12345, "iteration": 0}, _config())
+    interrupts = result["__interrupt__"]
+    assert len(interrupts) == 1
+    assert interrupts[0].value == {"issue_id": 12345, "plan_comment_id": 1}
 
 
-def test_approve_plan_approval_resets_iteration(monkeypatch):
-    """Approval resets iteration so plan rejections never eat the coder's
-    max_iterations budget; job-id uniqueness comes from the rejection bumps."""
+def test_approve_plan_resume_approval_resets_iteration(monkeypatch):
+    """Resuming with the human's /approve sends the run on with a reset
+    iteration counter, so plan rejections never eat the coder's budget."""
+    context = _issue_context()
     monkeypatch.setattr(
-        "aidevteam.graph.interrupt",
-        lambda payload: {"approved": True},
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
     )
-    update = approve_plan(
-        {"plan": None, "plan_feedback": ["smaller scope"], "iteration": 2}
+    graph = _gate_graph()
+    config = _config()
+    graph.invoke({"issue_id": 12345, "iteration": 3}, config)
+    state = graph.invoke(Command(resume={"action": "approve"}), config)
+    assert state["plan_approved"] is True
+    assert state["iteration"] == 0
+
+
+def test_approve_plan_resume_rejection_bumps_iteration(monkeypatch):
+    """Resuming with a /reject sends the run back to the planner and counts
+    the revision; the feedback itself lives on the issue, not in the state."""
+    context = _issue_context()
+    monkeypatch.setattr(
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
     )
-    assert update["plan_approved"] is True
-    assert update["plan_feedback"] == ["smaller scope"]
-    assert update["iteration"] == 0
+    graph = _gate_graph()
+    config = _config()
+    graph.invoke({"issue_id": 12345, "iteration": 1}, config)
+    state = graph.invoke(
+        Command(resume={"action": "reject", "feedback": "too many files"}), config
+    )
+    assert state["plan_approved"] is False
+    assert state["iteration"] == 2
 
 
-def test_approve_plan_interrupt_payload_contains_plan(monkeypatch):
-    captured: dict = {}
-
-    def fake_interrupt(payload):
-        captured.update(payload)
-        return {"approved": True}
-
-    monkeypatch.setattr("aidevteam.graph.interrupt", fake_interrupt)
-    approve_plan({"plan": {"app_name": "x"}, "iteration": 0})
-    assert captured["plan"] == {"app_name": "x"}
-    assert captured["revision"] == 0
+def test_approve_plan_fails_closed_without_a_plan(monkeypatch):
+    """An issue without a plan comment is an error, never an implicit approval."""
+    context = _issue_context(with_plan=False, plan_comment_id=0)
+    monkeypatch.setattr(
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
+    )
+    with pytest.raises(RuntimeError, match="carries no plan"):
+        _gate_graph().invoke({"issue_id": 12345}, _config())
 
 
-def test_approve_plan_fails_closed_on_malformed_resume(monkeypatch):
-    """A non-dict resume must count as a rejection, never skip the gate."""
-    monkeypatch.setattr("aidevteam.graph.interrupt", lambda payload: True)
-    update = approve_plan({"plan": None, "iteration": 0})
-    assert update["plan_approved"] is False
-    assert update["plan_feedback"] == []
-    assert update["iteration"] == 1
+def test_approve_plan_fails_closed_on_an_unreadable_plan(monkeypatch):
+    """A plan comment whose JSON block is broken must not leave an older plan
+    active nor be approved blind — the Planner has to re-post it."""
+    context = _issue_context(with_plan=False, plan_comment_id=7)
+    monkeypatch.setattr(
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
+    )
+    with pytest.raises(RuntimeError, match="no readable plan"):
+        _gate_graph().invoke({"issue_id": 12345}, _config())
 
 
-def test_approve_plan_tolerates_none_resume(monkeypatch):
-    monkeypatch.setattr("aidevteam.graph.interrupt", lambda payload: None)
-    update = approve_plan({"plan": None, "iteration": 0})
-    assert update["plan_approved"] is False
-    assert update["iteration"] == 1
+def test_approve_plan_stays_paused_on_an_empty_resume(monkeypatch):
+    """Resuming without a decision must not silently reject or approve the
+    plan: a falsy resume value re-raises the interrupt, leaving the run
+    paused exactly as before."""
+    context = _issue_context()
+    monkeypatch.setattr(
+        "aidevteam.graph.fetch_issue_context", lambda issue_id, tool=None: context
+    )
+    graph = _gate_graph()
+    config = _config()
+    graph.invoke({"issue_id": 12345}, config)
+    result = graph.invoke(Command(resume={}), config)
+    assert result.get("__interrupt__"), "the run must stay paused"
+    assert graph.get_state(config).next == ("approve_plan",)

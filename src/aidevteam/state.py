@@ -64,10 +64,11 @@ class Review(BaseModel):
 class TeamState(TypedDict, total=False):
     """State flowing through the Planner → Coder → Tester → Reviewer graph.
 
-    Only the *essential* state is checkpointed. The task, the plan and the
-    human feedback are transient agent context: they live on the run's
-    GitHub issue and are fetched from there whenever a node needs them, so
-    a checkpoint never grows with the size of the plan or the code.
+    The task, the plan and the human feedback are transient agent context:
+    they live on the run's GitHub issue and are fetched from there whenever
+    a node needs them, so the checkpoint never grows with the size of the
+    plan. The generated code *is* checkpointed (``code``) so a paused run
+    can be inspected and resumed without re-running the Coder.
     """
 
     # Essential checkpointed state

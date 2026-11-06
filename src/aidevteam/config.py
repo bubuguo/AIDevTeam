@@ -99,11 +99,6 @@ class Settings(BaseSettings):
     github_owner: str = ""   # Repository owner
     github_repo: str = ""   # Repository name
 
-    # Plan approval gate: the run polls the GitHub issue until the human
-    # comments /approve or /reject. A timeout of 0 (or less) waits forever.
-    approval_poll_interval: float = 5.0   # seconds between issue polls
-    approval_timeout: float = 3600.0      # give up waiting after this long
-
     def node_url(self, role: str) -> str:
         """Base URL of a node service, derived from its role name.
 

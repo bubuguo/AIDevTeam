@@ -44,15 +44,15 @@ def test_run_is_async_and_returns_job_id(fake_coder):
     client = TestClient(node_server.create_app("coder"))
     payload = {
         "task": "t",
-        "run_id": "20261024-234247-9f3a",
+        "issue_id": 12345,
         "plan": {"app_name": "csvtool", "summary": "s", "files": []},
         "iteration": 1,
     }
     response = client.post("/run", json=payload)
     assert response.status_code == 202
     job_id = response.json()["job_id"]
-    # Deterministic id: <run_id>-<role>-<iteration> — greppable across logs.
-    assert job_id == "20261024-234247-9f3a-coder-1"
+    # Deterministic id: <issue_id>-<role>-<iteration> — greppable across logs.
+    assert job_id == "12345-coder-1"
 
     # Poll the job until it finishes (the fake node takes ~50ms).
     for _ in range(50):
@@ -72,9 +72,9 @@ def test_node_failure_is_reported_via_job_status(monkeypatch):
     monkeypatch.setattr("aidevteam.agents.planner.planner", broken)
     client = TestClient(node_server.create_app("planner"))
     job_id = client.post(
-        "/run", json={"task": "t", "run_id": "r-1", "iteration": 0}
+        "/run", json={"task": "t", "issue_id": 12345, "iteration": 0}
     ).json()["job_id"]
-    assert job_id == "r-1-planner-0"
+    assert job_id == "12345-planner-0"
 
     for _ in range(50):
         body = client.get(f"/jobs/{job_id}").json()
@@ -97,9 +97,45 @@ def test_unknown_job_returns_404():
     assert client.get("/jobs/does-not-exist").status_code == 404
 
 
-def test_run_without_run_id_is_rejected():
-    """Every job must be tied to a pipeline run (the orchestrator seeds it)."""
+def test_run_without_issue_id_is_rejected():
+    """Every job must be tied to a GitHub issue (the orchestrator seeds it)."""
     client = TestClient(node_server.create_app("planner"))
     response = client.post("/run", json={"task": "t"})
     assert response.status_code == 422
-    assert "run_id is required" in response.json()["detail"]
+    assert "issue_id is required" in response.json()["detail"]
+
+
+def test_a_running_job_is_never_silently_replaced(monkeypatch):
+    """Re-submitting a job that is still running must be refused with 409:
+    node side effects are not idempotent, so the node must not execute twice
+    (a crashed orchestrator resuming, or a retried POST, must not duplicate
+    the work)."""
+    def slow_coder(state):
+        time.sleep(0.3)  # long enough that the duplicate POST lands mid-run
+        return {"iteration": state.get("iteration", 0) + 1}
+
+    monkeypatch.setattr("aidevteam.agents.coder.coder", slow_coder)
+    client = TestClient(node_server.create_app("coder"))
+    payload = {
+        "task": "t",
+        "issue_id": 12345,
+        "plan": {"app_name": "csvtool", "summary": "s", "files": []},
+        "iteration": 1,
+    }
+    first = client.post("/run", json=payload)
+    assert first.status_code == 202
+    job_id = first.json()["job_id"]
+
+    duplicate = client.post("/run", json=payload)
+    assert duplicate.status_code == 409
+    assert "already running" in duplicate.json()["detail"]
+
+    # Once the job has finished, an intentional re-run is allowed.
+    body = {"status": "running"}
+    for _ in range(100):
+        body = client.get(f"/jobs/{job_id}").json()
+        if body["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert body["status"] == "done"
+    assert client.post("/run", json=payload).status_code == 202

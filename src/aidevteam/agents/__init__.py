@@ -6,7 +6,7 @@ function): ``agents/<name>.py`` must define a function ``<name>(state) -> dict``
 """
 
 import importlib
-from typing import Callable
+from collections.abc import Callable
 
 
 def load_node(name: str) -> Callable[[dict], dict]:

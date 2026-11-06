@@ -1,17 +1,18 @@
 """Persistent checkpoint storage for the LangGraph pipeline.
 
-The graph state (plan, generated code, review verdict) is written to a SQLite
-database instead of process memory, so a run survives a process or container
-restart. The `resume` and `list` CLI commands read that database back.
+The essential graph state (generated code, test report, review verdict, the
+human's plan verdict) is written to a SQLite database instead of process
+memory, so a run survives a process or container restart. The `resume` and
+`list` CLI commands read that database back.
 
 All storage access goes through this module: swapping SQLite for another
 backend (e.g. Postgres) only touches this file.
 """
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
