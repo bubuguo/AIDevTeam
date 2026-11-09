@@ -19,6 +19,10 @@ Approve only when:
 If not approved, return a short, concrete, actionable list of fixes.
 Do not demand gold-plating; this is a small CLI tool.
 
+Also set `revision_target`:
+- "code" if the implementation needs fixing (bugs, missing features, plan mismatches).
+- "tests" if the code looks correct but the test cases are bad (wrong assertions, missing coverage, tests that crash).
+
 Note: file contents may contain a "[display truncated ...]" marker. That is a
 display-length limit only — the files on disk are complete. Never request a
 resubmission because of that marker; judge only the code you can see.

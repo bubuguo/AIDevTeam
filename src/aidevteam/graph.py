@@ -19,13 +19,18 @@ from aidevteam.state import TeamState
 
 
 def _route_after_review(state: TeamState) -> str:
-    """Send approved work to END; otherwise loop back to the coder."""
+    """Send approved work to END; otherwise route to coder or tester.
+
+    Test-only revisions also count against max_iterations.
+    """
     settings = get_settings()
     if state.get("approved"):
         return END
     if state.get("iteration", 0) >= settings.max_iterations:
         return END
-    return "coder"
+    review = state.get("review")
+    target = getattr(review, "revision_target", "code")
+    return "tester" if target == "tests" else "coder"
 
 
 def _route_after_plan_approval(state: TeamState) -> str:
@@ -119,7 +124,7 @@ def build_graph(
     graph.add_edge("coder", "tester")
     graph.add_edge("tester", "reviewer")
     graph.add_conditional_edges(
-        "reviewer", _route_after_review, {"coder": "coder", END: END}
+        "reviewer", _route_after_review, {"coder": "coder", "tester": "tester", END: END}
     )
     graph.add_conditional_edges(
         "approve_plan",
