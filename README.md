@@ -1,424 +1,351 @@
+# 从 AI Coding 到 AI 开发团队：两个小改动让团队更健壮 
 
-# 从 AI Coding 到 AI 开发团队：Graph的恢复
+在上一篇文章中，我们通过使用数据库代替 `MemorySaver`，让 AI 团队具备了状态持久化能力。即使遇到进程宕机、服务重启等异常情况，也可以从之前保存的工作流状态继续执行。
 
-在上一篇文章中，我们通过引入checkpointer以及Graph的__interrupt__机制，使Graph可以实现中断，完成的审批和继续执行
+不过，随着 AI 团队开始承担更多实际开发任务，我发现又出现了一些新的问题。
 
-这不由让我想让我们的工作流支持宕机重启的能力。同时也想了解下LangGraph时如何存储和恢复Graph的运行的
+最近使用 AI 团队时，好像模型服务最近不是很稳定。我在不同的 Module 之间切换，发现了两个比较明显的问题：
 
-## 一、代码改造
+1. LLM 返回错误，导致工作流执行失败。
+2. Tester 生成的测试代码存在问题，导致测试无法正常执行。
 
+对于第一个问题，目前的代码对 LLM 的执行过程完全没有监控。一次调用失败，我们很难判断究竟是模型服务本身出现了问题，还是 Context Window 被塞满了。
 
-### 引入SqliteSaver保存checkpoint状态
+对于第二个问题，之前的 Graph 设计也存在一些不够合理的地方。即使 Reviewer 已经发现问题出在测试代码上，工作流仍然会返回 Coder 节点，要求重新实现代码，然后再让 Tester 重新生成测试代码。
 
-在LangGraph里提供了以下几宗checkpoint saver的实现
-MemorySaver
-SqliteSaver
-AsyncSqliteSaver
-PostgresSaver
-AsyncPostgresSave
+这显然会产生很多不必要的 LLM 调用。
 
-上一次我们使用了MemorySaver，由于 `MemorySaver` 的状态保存在当前进程的内存中。这意味着，只要进程退出或重启，例如服务宕机，云上的Pod漂移，之前保存的状态就会丢失。
+因此，这次准备对 AIDevTeam 做两方面的改造：
 
-这一版我们选用了 `SqliteSaver`，状态借助Sqlite写入磁盘上的一个数据库文件：
-
-```python
-@contextmanager
-def persistent_checkpointer(path: str | Path | None = None) -> Iterator[SqliteSaver]:
-    db_path = checkpoint_db_path(path)
-    conn = sqlite3.connect(
-        db_path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS
-    )
-    try:
-        saver = SqliteSaver(
-            conn,
-            serde=JsonPlusSerializer(allowed_msgpack_modules=msgpack_allowlist()),
-        )
-        saver.setup()
-        yield saver
-    finally:
-        conn.close()
-```
-可以看到，除了管理数据库连接，其他的代码基本一致。
-
-具体数据库文件路径设置在aidevteam.properties中，别忘了在docker-compose.yml中将Volume挂载出来，否则coontainer重启状态还是会丢失
-
-### 增加list threads入口
-
-执行是通过thread_id恢复的，给我们的AIDevTeam增加list command，用来列出当前所有执行的thread_id和状态
-
-1. 读取数据库，获得当前所有的执行的thread_id
-2. 通过LangGraph的Graph的get_state方法重建存储的Graph状态
-3. 便利所有的Graph状态，并展示
-
-### 增加Resume入口
-1. 通过LangGraph的Graph的get_state方法重建指定thread_id的Graph状态
-2. 如果是等待用户输入则进入_approval_loop 循环
-3. 如果是恢复其他节点则，通过graph.invoke 继续Graph的执行
-
-这里为了简化即使是其他节点也通过外面嵌套一层_approval_loop
-
-因为恢复的节点有可能是Plan节点，如果不加这一层在Plan执行完之后，会进入interrupt状态，程序会直接结束
-···
-_approval_loop(graph, config, graph.invoke(None, config))
-···
-
-这次改造就完成了，比较简单的一次改动
-
-实际上今天的重头戏是看一下，LangGraph的Graph执行信息是如何存储的
-
-我在等待计划审批时中断了程序执行，让我们看一下数据库里都有些什么
-
-
-
-数据库里包含checkpoints和writes两张表，其中已经对checkpoints表的checkpoint字段和writes表的value进行了反序列化
-
-### 表：`checkpoints`
-| thread_id | checkpoint_ns | checkpoint_id | parent_checkpoint_id | type | checkpoint | metadata |
-|---|---|---|---|---|---|---|
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `NULL` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.312955+00:00',` | `{'source': 'input', 'step': -1, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.313629+00:00',` | `{'source': 'loop', 'step': 0, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d319c-ee88-6ade-8001-28d70e8f396a` | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:52:02.418531+00:00',` | `{'source': 'loop', 'step': 1, 'parents': {}}` |
-
-
-### 表：`writes`
-
-| thread_id | checkpoint_ns | checkpoint_id | task_id | task_path | idx | channel | type | value |
-|---|---|---|---|---|---:|---|---|---|
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 0 | `task` | `msgpack` | `build a word-count CLI tool` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 1 | `run_id` | `msgpack` | `20261028-215002-2569` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 2 | `iteration` | `msgpack` | `0` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 3 | `plan_approval` | `msgpack` | `True` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 4 | `branch:to:planner` | `null` |  |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `30216ee0-e441-5363-314d-10d01cc85291` | `~__pregel_pull, planner` | 0 | `plan` | `msgpack` | `app_name='word-count' summary='A small standard-li` |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `30216ee0-e441-5363-314d-10d01cc85291` | `~__pregel_pull, planner` | 1 | `branch:to:approve_plan` | `null` |  |
-| `20261028-215002-2569` |  | `1f1d319c-ee88-6ade-8001-28d70e8f396a` | `8e0622f1-964c-b699-3aff-808c5686e312` | `~__pregel_pull, approve_plan` | -3 | `__interrupt__` | `msgpack` | `[Interrupt(value={'plan': {'app_name': 'word-count'` |
-
-
-thread_id就是我们的一次执行，checkpoint_id可以对应到一个Graph的节点，checkpoint是我们最感兴趣的
-让我们展开最后一个checkpoint
-···
-    'v': 4, 
-    'ts': '2026-10-28T21:52:02.418531+00:00', 
-    'id': '1f1d319c-ee88-6ade-8001-28d70e8f396a', 
-    'channel_values': {
-        'task': 'build a word-count CLI tool', 
-        'run_id': '20261028-215002-2569', 
-        'plan': Plan(app_name='word-count', summary='A small standard-library-only CLI that counts words in text supplied as arguments or read from files, with optional filtering of short words and support for common plain-text encodings.', cli_commands=['python app.py count "Hello, world!"', 'python app.py count --min-length 3 "a be cat"', 'python app.py count --ignore-case "Hello hello"', 'python app.py count notes.txt', 'python app.py count notes.txt another.txt', 'python app.py count --stdin', 'python app.py count --min-length 3 --ignore-case notes.txt'], files=[FileSpec(path='app.py', description='CLI entry point and reusable functions. Implement count_words(text, min_length=1, ignore_case=False) to split text on whitespace and count words meeting the minimum length; read_text(path) to read UTF-8 text files with a clear error for missing/unreadable files; and build_parser()/main(argv=None) using argparse with a count subcommand. Accept one or more text arguments and/or file paths, plus --stdin to read standard input, --min-length (non-negative integer), and --ignore-case. Print a total word count and, when multiple inputs are supplied, a per-input breakdown. Handle empty input and file errors with friendly messages and non-zero exit codes.')]), 
-        'iteration': 0, 
-        'plan_approval': True, 
-        'branch:to:approve_plan': None
-    }, 
-    'channel_versions': {
-        '__start__': '00000000000000000000000000000002.0.73221403814305', 
-        'task': '00000000000000000000000000000002.0.73221403814305', 
-        'run_id': '00000000000000000000000000000002.0.73221403814305', 
-        'iteration': '00000000000000000000000000000002.0.73221403814305', 
-        'plan_approval': '00000000000000000000000000000002.0.73221403814305', 
-        'branch:to:planner': '00000000000000000000000000000003.0.45862768924600783', 
-        'plan': '00000000000000000000000000000003.0.45862768924600783', 
-        'branch:to:approve_plan': '00000000000000000000000000000003.0.45862768924600783'
-    }, 
-    'versions_seen': {
-        '__input__': {}, 
-        '__start__': {'__start__': '00000000000000000000000000000001.0.7110444538049118'}, 
-        'planner': {'branch:to:planner': '00000000000000000000000000000002.0.73221403814305'}
-    }, 
-    'updated_channels': ['branch:to:approve_plan', 'plan']
-···
-
-
-- `channel_values`：当前所有状态 channel 的值
-- `updated_channels`：这个 checkpoint 中哪些 channel 发生了变化
-- `channel_versions`：各 channel 的版本号
-- `versions_seen`：各节点已经消费过哪些版本
-
-channel可以理解为当前节点的是个属性？？，
-checkpoints表的每一条记录就是一个当前节点的快照，在恢复Graph时，LangGraph可以快速的查找到当前节点，依赖 `channel_values` 中的信息快速重建Graph状态。
-
-
-
-而writes表中保存有和他关联的checkpoint的具体对channel值的更改信息，每个channel的一个更改一条记录，依靠writes表可以一步一步的重放Graph的历史
-
-在仔细研究存储内容之前，我以为里面只保留了最后一步的State值，一看才知道是我浅薄了，原来checkpoints的设计不止可以resume中断的状态，还可以一步一步回溯Graph的执行
-
-可以优化改进流程，审计操作，很多的应用场景
-
-
-
-# 从 AI Coding 到 AI 开发团队：Graph 的恢复
-
-在上一篇文章中，我们通过引入 Checkpointer 和 Graph 的 `interrupt()` 机制，让 AIDevTeam 可以暂停工作流，等待人工审批，再继续执行。
-
-不过，这还留下了一个问题。
-
-如果工作流暂停后，服务进程意外退出了呢？如果运行任务的 Pod 被重建了呢？如果我想在第二天回来之后，再继续昨天没有完成的任务呢？
-
-这让我想进一步了解 LangGraph 是如何保存和恢复工作流的，也决定给 AIDevTeam 增加宕机重启后的恢复能力。
+- 增加 LLM 调用监控，统计每次调用的输入和输出 Token，帮助我们定位模型调用问题。
+- 优化 Graph 的执行路径，让 Reviewer 能够根据问题类型，将任务准确地返回给 Coder 或 Tester。
 
 ## 一、代码改造
 
-### 1. 引入 SqliteSaver 保存 checkpoint
+### 1. 增加 LLM 监控
 
-LangGraph 提供了多种 Checkpointer 实现，适用于不同的运行环境和持久化需求，例如：
+首先解决 LLM 调用不可观测的问题。
 
-- `InMemorySaver`（也常被称为 `MemorySaver`）：将状态保存在内存中。
-- `SqliteSaver`：使用 SQLite 数据库保存状态。
-- `AsyncSqliteSaver`：SQLite 的异步版本。
-- `PostgresSaver`：使用 PostgreSQL 保存状态。
-- `AsyncPostgresSaver`：PostgreSQL 的异步版本。
+之前在 `llm.py` 中，我们直接使用 `ChatOpenAI` 创建模型实例，然后将其交给各个 Agent 使用。
 
-上一版我们使用的是 `MemorySaver`。由于状态保存在当前进程的内存中，只要进程退出或重启，之前保存的状态就会丢失。
+这种方式虽然简单，但有一个问题：LLM 的调用分散在不同的 Agent 中，我们很难统一观察每次调用的情况。
 
-因此，这一版我选择了 `SqliteSaver`，将 checkpoint 写入磁盘上的 SQLite 数据库文件。
+因此，这次增加一个包装类 `MonitoredLLM`，将原始 LLM 包装起来。
 
-核心代码如下：
+它主要负责两件事情：
+
+1. 包装原始 LLM 的调用方法。
+2. 在调用完成后统计输入和输出 Token 数量。
+
+Token 统计这里使用了 `tiktoken` 提供的 `count_tokens` 方法。
+
+需要特别说明的是，`tiktoken` 是 OpenAI 提供的 Tokenizer 工具，不同模型使用的 Tokenizer 可能并不相同。因此，对于 OpenAI 模型之外的其他模型，统计结果只能作为参考，不能认为它就是模型服务端实际计算的 Token 数量。
+
+这次主要对 `invoke` 和 `ainvoke` 两个方法进行包装，分别对应同步和异步调用。
+
+整体思路如下：
 
 ```python
-@contextmanager
-def persistent_checkpointer(
-    path: str | Path | None = None,
-) -> Iterator[SqliteSaver]:
-    db_path = checkpoint_db_path(path)
+class MonitoredLLM:
 
-    conn = sqlite3.connect(
-        db_path,
-        check_same_thread=False,
-        timeout=BUSY_TIMEOUT_SECONDS,
-    )
+    def __init__(self, llm):
+        self.llm = llm
 
-    try:
-        saver = SqliteSaver(
-            conn,
-            serde=JsonPlusSerializer(
-                allowed_msgpack_modules=msgpack_allowlist()
-            ),
+    def invoke(self, messages, config=None, **kwargs):
+        response = self.llm.invoke(
+            messages, config=config, **kwargs
         )
-        saver.setup()
-        yield saver
-    finally:
-        conn.close()
+
+        # 统计输入和输出 Token
+        input_tokens = count_tokens(messages)
+        output_tokens = count_tokens(response.content)
+
+        print(
+            f"LLM Tokens: "
+            f"input={input_tokens}, "
+            f"output={output_tokens}"
+        )
+
+        return response
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        response = await self.llm.ainvoke(
+            messages, config=config, **kwargs
+        )
+
+        # 统计输入和输出 Token
+        input_tokens = count_tokens(messages)
+        output_tokens = count_tokens(response.content)
+
+        print(
+            f"LLM Tokens: "
+            f"input={input_tokens}, "
+            f"output={output_tokens}"
+        )
+
+        return response
 ```
 
-可以看到，除了管理数据库连接和设置序列化器，其他逻辑与之前基本一致。
+这里展示的是核心逻辑，实际实现中还需要根据项目使用的消息类型处理输入内容，并考虑异常处理以及其他 Runnable 接口的兼容性。
 
-数据库文件路径配置在 `aidevteam.properties` 中。这里还有一个容易忽略的细节：**数据库文件必须存放在容器重启后仍然存在的位置。**
+另外，为什么选择在原始方法执行完成后统计？
 
-因此，我还在 `docker-compose.yml` 中配置了 Volume，将数据库文件挂载到持久化存储上。否则，即使使用了 `SqliteSaver`，容器被删除或重新创建后，数据库文件仍然可能丢失。
+因为这样不需要修改原有 Agent 的调用方式。对于上层代码来说，它仍然是在调用一个 LLM，只不过现在每次调用都会额外输出 Token 统计信息。
 
-这样，工作流状态就不再依赖某个进程的内存了。
+这样一来，当某个 Module 执行失败时，我们就可以观察它之前的 LLM 调用情况。
 
-### 2. 增加 list 命令
+如果输入 Token 持续增长，就需要重点关注 Context Window 是否接近上限；如果 Token 数量并不异常，却频繁出现调用失败，则可以进一步检查模型服务、网络连接以及 API 返回错误。
 
-既然状态已经持久化，接下来就需要一个入口，让我们知道目前有哪些任务，以及它们处于什么状态。
+当然，Token 数量只能帮助我们缩小排查范围，并不能直接判断错误原因。后续还需要进一步记录模型名称、调用耗时、异常信息等数据。
 
-因此，我给 AIDevTeam 增加了 `list` 命令，主要完成三件事：
+至少现在，我们不再是完全摸黑排查了。
 
-1. 从 checkpoint 存储中获取当前存在的工作流线程。
-2. 根据对应的 `thread_id`，调用 LangGraph 的 `get_state()` 获取工作流状态。
-3. 根据状态快照及其执行信息，整理并展示任务状态。
+### 2. function_calling vs. json_schema
 
-这里需要区分两个概念：`thread_id` 用于标识一条工作流线程，而 checkpoint 是这条线程在某个时刻保存的状态快照。
+除了监控问题，这次还顺手解决了一个之前一直比较困扰我的问题。
 
-通过 `get_state()`，我们可以读取对应线程最近保存的状态，并进一步判断工作流是否已经结束、是否还需要恢复，以及是否存在等待处理的中断。
+在不同模型之间切换时，我发现 Structured Output 偶尔会出现一些奇怪的解析错误。
 
-这让原本只能通过日志观察的任务，开始具备了基本的查询和管理能力。
+例如：
 
-### 3. 增加 Resume 命令
+```text
+Value error, files must be a list or a JSON-encoded list string:
+Expecting value: line 1 column 38 (char 37)
 
-有了任务列表，下一步就是恢复任务。
+[type=value_error,
+ input_value='[{"path": "wordcount.py"...ys.exit(main())\\n\\"}]',
+ input_type=str]
+```
 
-我增加了 `resume` 入口，主要流程如下：
+从错误信息来看，原本应该返回一个 List 的字段，却被模型返回成了无法正常解析的字符串。
 
-1. 根据指定的 `thread_id`，通过 `graph.get_state()` 获取当前工作流状态。
-2. 如果工作流正在等待人工输入，就进入 `_approval_loop`，继续处理审批和恢复。
-3. 如果工作流处于其他可恢复状态，则调用 `graph.invoke()` 继续执行，并在必要时进入同一个审批循环。
+这让我开始怀疑，不同模型在处理 Structured Output 时，对底层编码方式的支持可能存在差异。
 
-为什么要把执行过程统一放到 `_approval_loop` 中？
+之前使用的是默认的 Structured Output 实现，而 LangChain 的 `with_structured_output()` 支持指定不同的实现方式。
 
-因为恢复一个工作流，不代表它一定会直接执行到结束。
-
-例如，某个任务恢复后，可能从 Planner 节点继续执行。Planner 完成后，工作流又会进入 `approve_plan` 节点，并触发下一次 `interrupt()`。
-
-如果外层程序只调用一次 `graph.invoke()`，然后就直接退出，那么新的中断就没有机会继续交给用户处理。
-
-所以，我把执行和处理中断的逻辑统一封装在 `_approval_loop` 中：
+这次改为显式使用 `json_schema`：
 
 ```python
-_approval_loop(
-    graph,
-    config,
-    graph.invoke(None, config),
+llm.with_structured_output(
+    schema,
+    method="json_schema"
 )
 ```
 
-这里的 `graph.invoke(None, config)` 用于从已有的工作流状态继续执行；`_approval_loop` 则负责处理执行结果中可能出现的中断。
+与 `function_calling` 不同，`json_schema` 使用 JSON Schema 约束模型的输出结构，而不是通过工具调用的形式获取结构化结果。
 
-具体实现仍然需要区分首次启动、等待审批、普通恢复和任务结束等情况，但对外可以统一成一个恢复入口。
+两种方式都有各自的适用场景，具体表现也会受到模型和服务提供商实现的影响。
 
-到这里，代码改造基本完成了。
+目前在我的实际使用中，切换到 `json_schema` 后，观察到的结果比之前稳定。
 
-从实现上看，这只是把内存存储换成了 SQLite，再增加两个管理命令，并没有特别复杂的改动。
+这次测试了 4、5 种不同的模型，没有再出现之前类似的 List 解包错误。
 
-不过，真正有意思的部分才刚刚开始。
+当然，这并不意味着 `json_schema` 一定比 `function_calling` 更好。不同模型对结构化输出的支持程度不同，实际项目中还是需要根据模型能力进行测试。
 
-## 二、看看数据库里究竟保存了什么
+不过，至少对于当前的 AIDevTeam 来说，这个调整解决了一个比较明显的兼容性问题。
 
-我原本以为，LangGraph 的 checkpoint 只需要保存最后一次的 State 就够了。
+### 3. 优化 Graph 的执行路径
 
-为了验证这个想法，我启动了一个任务，在等待计划审批时中断了程序，然后直接查看 SQLite 数据库里的内容。
+前面解决了 LLM 调用的可观测性，接下来处理第二个问题：测试代码本身存在错误。
 
-结果发现，LangGraph 保存的信息比我预想的要丰富得多。
+还记得之前 AIDevTeam 的开发流程吗？
 
-### 1. checkpoints 表
+Coder 负责实现代码，Tester 根据实现生成测试用例，最后 Reviewer 对整个结果进行检查。
 
-在当前使用的 SQLite Checkpointer 实现中，主要可以看到 `checkpoints` 和 `writes` 两张表。
+之前的 Graph 大致是这样的：
 
-先看 `checkpoints` 表。下面是一次任务中几条记录的简化示例，`checkpoint` 字段只展示了部分内容。
-
-| thread_id | checkpoint_ns | checkpoint_id | parent_checkpoint_id | type | checkpoint | metadata |
-|---|---|---|---|---|---|---|
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `NULL` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.312955+00:00',` | `{'source': 'input', 'step': -1, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.313629+00:00',` | `{'source': 'loop', 'step': 0, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d319c-ee88-6ade-8001-28d70e8f396a` | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:52:02.418531+00:00',` | `{'source': 'loop', 'step': 1, 'parents': {}}` |
-
-
-其中有几个值得关注的字段：
-
-- `thread_id`：标识这条工作流线程。
-- `checkpoint_ns`：标识 checkpoint 所属的命名空间。简单的 Graph 通常为空；使用子图时，可能会出现不同的命名空间。
-- `checkpoint_id`：标识一份具体的 checkpoint 快照。
-- `parent_checkpoint_id`：记录父 checkpoint 的标识，可以用来关联不同快照。
-- `metadata`：记录 checkpoint 的来源、执行步骤等元信息。
-
-这里要特别说明：**`checkpoint_id` 标识的是一份状态快照，而不是一个 Graph 节点。** 一个节点的执行过程可能涉及多份 checkpoint，不能简单地把它们一一对应。
-
-### 2. writes 表
-
-再看 `writes` 表。这里保存的是与某次 checkpoint 关联的任务写入信息。
-
-例如，在我的任务中，可以看到类似下面的记录：
-
-
-| checkpoint_id | task_path | idx | channel | value（简化） |
-|---|---|---:|---|---|
-| 初始 checkpoint | `__start__` | 0 | `task` | `build a word-count CLI tool` |
-| 初始 checkpoint | `__start__` | 1 | `run_id` | `20261028-215002-2569` |
-| 初始 checkpoint | `__start__` | 2 | `iteration` | `0` |
-| Planner checkpoint | `planner` | 0 | `plan` | `Plan(...)` |
-| Planner checkpoint | `planner` | 1 | `branch:to:approve_plan` | `null` |
-| 审批 checkpoint | `approve_plan` | -3 | `__interrupt__` | `[Interrupt(...)]` |
-
-为了方便阅读，我省略了部分字段和序列化细节。实际表中还会记录 `task_id`、`checkpoint_ns`、`type` 等信息。
-
-从这些数据中，我们可以看到工作流的输入、Planner 生成的计划，以及审批节点产生的中断信息。
-
-这也解释了为什么 `checkpoints` 和 `writes` 需要配合使用：前者保存状态快照，后者记录执行过程中与任务相关的写入信息。它们共同参与工作流状态的保存和恢复，而不是简单地分别承担“当前状态”和“完整历史日志”两个互不相关的职责。
-
-## 三、展开最后一个 checkpoint
-
-真正让我感兴趣的是 `checkpoint` 字段。
-
-对它进行反序列化后，可以看到类似下面的结构。为了突出重点，我省略了部分版本号和内部细节：
-
-```python
-{
-    "v": 4,
-    "ts": "2026-10-28T21:52:02.418531+00:00",
-    "id": "1f1d319c-ee88-6ade-8001-28d70e8f396a",
-
-    "channel_values": {
-        "task": "build a word-count CLI tool",
-        "run_id": "20261028-215002-2569",
-        "plan": Plan(...),
-        "iteration": 0,
-        "plan_approval": True,
-        "branch:to:approve_plan": None,
-    },
-
-    "channel_versions": {
-        "task": "...",
-        "run_id": "...",
-        "plan": "...",
-        "iteration": "...",
-    },
-
-    "versions_seen": {
-        "__start__": {...},
-        "planner": {...},
-    },
-
-    "updated_channels": [
-        "branch:to:approve_plan",
-        "plan",
-    ],
-}
+```text
+       ┌─────────┐
+       ▼         │
+Plan → Coder → Tester → Reviewer
+         ▲                 │
+         └─────────────────┘
+                           │
+                           ▼
+                          End
 ```
 
-这份结构里有几个比较重要的字段。
+当 Reviewer 发现问题时，工作流会重新返回 Coder。
 
-### 1. channel_values：当前保存的状态值
+这种设计在大多数情况下没有问题。毕竟，如果是实现代码存在 Bug，确实应该让 Coder 重新修改。
 
-`channel_values` 保存的是 checkpoint 中各个状态 channel 对应的值。
+但是，最近发现有时问题并不在 Coder，而是 Tester 生成的测试代码本身存在错误。
 
-在我们的 AIDevTeam 中，可以看到任务输入、`run_id`、开发计划、迭代次数等信息。
+例如：
 
-这里可以把 channel 理解为 LangGraph 状态中的一个数据通道。它不完全等同于普通对象的属性：除了用户定义的 State 字段，LangGraph 内部还有用于调度和执行控制的 channel。
+- 测试断言与实际需求不一致。
+- 测试用例没有覆盖必要的场景。
+- 测试代码本身无法正常运行。
 
-因此，`channel_values` 不只是我们在 `TeamState` 中声明的业务字段，还可能包含工作流执行所需的内部信息。
+这些问题实际上应该由 Tester 负责修复。
 
-### 2. updated_channels：这次更新了什么
+但按照之前的执行路径，即使 Reviewer 已经发现是测试代码的问题，工作流仍然会返回 Coder。
 
-`updated_channels` 记录这份 checkpoint 中发生更新的 channel。
+于是就产生了一个比较尴尬的过程：
 
-例如，这次保存的状态中包含 `plan` 和 `branch:to:approve_plan`，说明这一步的执行涉及计划数据和工作流分支信息。
+```text
+Reviewer 发现测试代码有问题
+              │
+              ▼
+         返回 Coder
+              │
+              ▼
+         重新实现代码
+              │
+              ▼
+         Tester 重新生成测试
+              │
+              ▼
+          Reviewer
+```
 
-通过这个字段，可以更方便地了解某份 checkpoint 与前后执行步骤之间的关系。
+Coder 可能只是重新生成了一遍原本就正确的代码，Tester 又重新生成了一遍测试用例。
 
-### 3. channel_versions：各个 channel 的版本
+这不仅浪费 Token，也增加了整个工作流的执行时间。
 
-`channel_versions` 记录各个 channel 的版本信息。
+因此，这次准备让 Reviewer 根据问题类型决定下一步应该交给谁处理。
 
-LangGraph 使用这些版本信息来追踪状态变化，并判断不同节点和 channel 之间的依赖关系。
+首先，在 Reviewer 的 Prompt 中增加一个字段 `revision_target`：
 
-它们不是简单的业务版本号，也不应该被直接理解为某个字段的修改次数。
+```text
+Also set `revision_target`:
+- "code" if the implementation needs fixing
+  (bugs, missing features, plan mismatches).
+- "tests" if the code looks correct but the test cases are bad
+  (wrong assertions, missing coverage, tests that crash).
+```
 
-### 4. versions_seen：节点已经处理过哪些版本
+这个字段用于告诉 Graph 当前需要修改的对象：
 
-`versions_seen` 记录各个节点已经处理过的 channel 版本。
+- `code`：实现代码存在问题，需要返回 Coder。
+- `tests`：实现代码没有问题，但测试用例存在问题，需要返回 Tester。
 
-这与 LangGraph 的执行调度有关：框架需要知道节点已经消费过哪些状态版本，才能判断后续是否需要再次执行。
+有了这个字段，就可以修改 Reviewer 后面的条件边。
 
-这也是为什么 checkpoint 里不只有业务数据，还包含了不少看起来比较底层的执行元信息。
+之前 Reviewer 只有一个返回 Coder 的分支，现在增加 Tester 分支：
 
-**LangGraph 保存的不是单纯的一份 State，而是恢复工作流所需要的状态和调度信息。**
+```python
+graph.add_conditional_edges(
+    "reviewer",
+    _route_after_review,
+    {
+        "coder": "coder",
+        "tester": "tester",
+        END: END
+    }
+)
+```
 
-## 四、原来 Graph 不只可以恢复，还可以回溯
+这样，Reviewer 就可以根据审核结果直接选择下一步执行节点。
 
-研究完这些字段后，我对 LangGraph 的 checkpoint 机制有了更深入的认识。
+新的执行路径如下：
 
-一开始，我以为它只是在工作流中断时保存最后一份 State，等恢复时再把 State 读出来。
+```text
+  ┌─────────┐           ┌──────┬──────┐
+  ▼         │           ▼      ▼      │
+Plan → Plan Approve → Code → Test → Review
+                                      │
+                                      ▼
+                                     End
+```
 
-但从数据库结构可以看出，LangGraph 还会保存多份关联的 checkpoint，并通过 `parent_checkpoint_id` 等信息将它们联系起来。
+其中 Reviewer 可以根据 `revision_target`：
 
-这意味着，我们不仅可以恢复某条工作流线程，还可以利用保存的历史状态，检查工作流在不同时间点的执行情况。
+- 返回 `coder`，重新实现代码。
+- 返回 `tester`，重新生成测试用例。
+- 返回 `END`，结束当前工作流。
 
-例如，LangGraph 提供的状态查询能力可以用于读取当前状态，也可以在支持的接口中查看历史 checkpoint。基于这些能力，我们可以进一步探索：
+这样就避免了测试代码有问题时，还需要让 Coder 重新执行一遍。
 
-- **调试**：检查某一步执行时，工作流中保存了哪些状态。
-- **审计**：追踪计划、反馈和其他状态是如何变化的。
-- **状态回溯**：查看工作流在较早的 checkpoint 中是什么状态。
-- **流程优化**：分析工作流在哪些节点反复执行，或者在哪些环节频繁失败。
+当然，这里有一个前提：Reviewer 必须能够正确区分代码问题和测试问题。如果判断错误，工作流仍然可能走向不合适的节点。
 
-当然，这不意味着 `writes` 表本身就是一份可以任意重放的完整事件日志，也不意味着只要恢复到旧 checkpoint，就能撤销已经发生的外部操作。
+不过，将问题分类和执行路径分离，本身就是一次有价值的改进。后续即使需要增加更多的处理节点，也可以沿用类似的设计。
 
-例如，AI 如果已经调用外部 API 创建了资源，或者已经修改了真实系统中的配置，恢复到旧 checkpoint 并不会自动撤销这些操作。
+## 二、执行效果
 
-**状态可以回溯，不代表外部世界也能回滚。**
+经过这次改造，AIDevTeam 的执行过程有了两个比较明显的变化。
 
-这也是为什么在 AIDevTeam 中，我们既需要可靠的状态持久化，也需要继续做好执行权限控制、操作审计和必要的人工审批。
+### 1. LLM 调用情况更加直观
 
-下一步，我想继续探索的是：在已经具备持久化和恢复能力的基础上，能否进一步利用这些机制，让工作流更容易调试、更容易观察，也更容易从失败中恢复。
+```
+context[]: 959 in + 1197 out = 2156 tokens
+```
 
-毕竟，让 AI 自动完成任务只是第一步。
+现在每次调用 LLM 后，都会输出对应的输入和输出 Token 数量。
 
-让它能够在服务重启后继续工作，并且让我们看清它究竟做过什么，才更接近一个真正可用的 AI 开发团队。
+这样在不同 Module 之间切换时，可以比较直观地看到各个 Agent 的 Context 使用情况。
+
+尤其是当某个任务执行时间比较长时，可以观察输入 Token 是否随着迭代不断增长。
+
+这也为后续优化 Context 提供了一个比较明确的方向。
+
+### 2. function_calling vs. json_schema
+
+除了监控问题，这次还顺手解决了一个之前一直比较困扰我的问题。
+
+在不同模型之间切换时，我发现 Structured Output 偶尔会出现一些奇怪的解析错误。
+
+例如：
+
+```
+Value error, files must be a list or a JSON-encoded list string:
+Expecting value: line 1 column 38 (char 37)
+
+[type=value_error, input_value='[{"path": "wordcount.py"...ys.exit(main())\\n\\"}]', input_type=str]
+```
+
+从错误信息来看，原本应该返回一个 List 的字段，却被模型返回成了无法正常解析的字符串。
+
+看起来不同模型对 function_calling 的返回格式处理存在一定差异，而 LangChain 在解析这些结果时，也可能受到模型具体实现的影响。
+
+因此，这次尝试换一种方式，显式指定使用 json_schema：
+
+llm.with_structured_output(
+    schema,
+    method="json_schema"
+)
+
+与 function_calling 不同，json_schema 通过 JSON Schema 约束模型的输出结构，而不是通过工具调用的形式获取结构化结果。
+
+目前在我的实际使用中，切换到 json_schema 后，观察到的结果比之前稳定。
+
+测试了 4、5 种不同的模型，没有再出现之前类似的 List 解析错误。
+
+当然，这并不意味着 json_schema 一定比 function_calling 更好。不同模型对结构化输出的支持程度不同，实际项目中还是需要根据模型能力进行测试。
+
+不过，至少对于当前的 AIDevTeam 来说，这个调整解决了一个比较明显的兼容性问题。
+
+### 3. Reviewer 可以直接返回 Tester
+
+![新流程](./docAsset/graph.png)
+
+从执行结果可以看到，当 Reviewer 判断问题出在测试代码时，不再要求 Coder 重新实现，而是直接跳转到 Tester 节点重新生成测试用例。
+
+这样就形成了更加合理的执行路径。
+
+相比之前不区分问题类型、一律返回 Coder 的方式，现在可以减少一些没有必要的 LLM 调用。
+
+## 三、下一步
+
+通过这次改造，AIDevTeam 又向前迈进了一小步。
+
+这次主要解决了两个问题：
+
+- `MonitoredLLM`：增加 LLM 调用监控，通过输入和输出 Token 统计，让 Context 使用情况更加直观。
+- `json_schema`：调整 Structured Output 的实现方式，改善不同模型之间的兼容性。
+- Graph 条件边：根据 Reviewer 的判断结果，将任务分别返回 Coder 或 Tester，减少不必要的重复执行。
+
+不过，这次改造也让我发现了一个新的问题。
+
+目前我们虽然能够看到每次 LLM 调用的 Token 数量，但还没有真正建立 Context 管理机制。
+
+当任务越来越复杂，Agent 需要反复读取文件、执行测试、接收 Review 意见时，Context 很可能会不断增长。
+
+如果只是监控，而不主动控制，最终还是可能遇到 Context Window 超限的问题。
+
+因此，下一步准备重点研究 Context 管理，包括如何控制上下文长度、如何保留重要信息，以及如何在必要时对历史信息进行压缩。
+
+毕竟，让 AI 自己开发只是第一步。要让 AI 团队长期稳定地工作，除了给它们安排好任务，还得关注它们是不是已经把脑子塞满了。
+
+至少现在，我终于可以知道它们的脑子到底塞了多少东西了。
+
