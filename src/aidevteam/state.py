@@ -1,7 +1,7 @@
 """Graph state and structured artifacts passed between agents."""
 
 from functools import lru_cache
-from typing import TypedDict, get_type_hints
+from typing import Literal, TypedDict, get_type_hints
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,10 @@ class Review(BaseModel):
     approved: bool = Field(description="True when the submission is ready to ship")
     feedback: list[str] = Field(
         default_factory=list, description="Concrete, actionable fixes required (empty when approved)"
+    )
+    revision_target: Literal["code", "tests"] = Field(
+        default="code",
+        description="What needs fixing: 'code' for implementation issues, 'tests' for bad test cases",
     )
 
 

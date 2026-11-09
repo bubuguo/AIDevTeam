@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # tokens stream; without it a stalled connection hangs the pipeline.
     llm_timeout: float = 300.0
 
+    # Optional LLM context window (tokens). When set, the context monitor in
+    # llm.py logs utilisation as a percentage of this limit and warns when a
+    # single call exceeds it. Leave unset to log raw token counts only.
+    llm_context_limit: int | None = None
+
     # Runtime tuning — settable via aidevteam.properties
     temperature: float = 0.2
     max_iterations: int = 3
