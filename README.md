@@ -1,150 +1,4 @@
 
-# 从 AI Coding 到 AI 开发团队：Graph的恢复
-
-在上一篇文章中，我们通过引入checkpointer以及Graph的__interrupt__机制，使Graph可以实现中断，完成的审批和继续执行
-
-这不由让我想让我们的工作流支持宕机重启的能力。同时也想了解下LangGraph时如何存储和恢复Graph的运行的
-
-## 一、代码改造
-
-
-### 引入SqliteSaver保存checkpoint状态
-
-在LangGraph里提供了以下几宗checkpoint saver的实现
-MemorySaver
-SqliteSaver
-AsyncSqliteSaver
-PostgresSaver
-AsyncPostgresSave
-
-上一次我们使用了MemorySaver，由于 `MemorySaver` 的状态保存在当前进程的内存中。这意味着，只要进程退出或重启，例如服务宕机，云上的Pod漂移，之前保存的状态就会丢失。
-
-这一版我们选用了 `SqliteSaver`，状态借助Sqlite写入磁盘上的一个数据库文件：
-
-```python
-@contextmanager
-def persistent_checkpointer(path: str | Path | None = None) -> Iterator[SqliteSaver]:
-    db_path = checkpoint_db_path(path)
-    conn = sqlite3.connect(
-        db_path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS
-    )
-    try:
-        saver = SqliteSaver(
-            conn,
-            serde=JsonPlusSerializer(allowed_msgpack_modules=msgpack_allowlist()),
-        )
-        saver.setup()
-        yield saver
-    finally:
-        conn.close()
-```
-可以看到，除了管理数据库连接，其他的代码基本一致。
-
-具体数据库文件路径设置在aidevteam.properties中，别忘了在docker-compose.yml中将Volume挂载出来，否则coontainer重启状态还是会丢失
-
-### 增加list threads入口
-
-执行是通过thread_id恢复的，给我们的AIDevTeam增加list command，用来列出当前所有执行的thread_id和状态
-
-1. 读取数据库，获得当前所有的执行的thread_id
-2. 通过LangGraph的Graph的get_state方法重建存储的Graph状态
-3. 便利所有的Graph状态，并展示
-
-### 增加Resume入口
-1. 通过LangGraph的Graph的get_state方法重建指定thread_id的Graph状态
-2. 如果是等待用户输入则进入_approval_loop 循环
-3. 如果是恢复其他节点则，通过graph.invoke 继续Graph的执行
-
-这里为了简化即使是其他节点也通过外面嵌套一层_approval_loop
-
-因为恢复的节点有可能是Plan节点，如果不加这一层在Plan执行完之后，会进入interrupt状态，程序会直接结束
-···
-_approval_loop(graph, config, graph.invoke(None, config))
-···
-
-这次改造就完成了，比较简单的一次改动
-
-实际上今天的重头戏是看一下，LangGraph的Graph执行信息是如何存储的
-
-我在等待计划审批时中断了程序执行，让我们看一下数据库里都有些什么
-
-
-
-数据库里包含checkpoints和writes两张表，其中已经对checkpoints表的checkpoint字段和writes表的value进行了反序列化
-
-### 表：`checkpoints`
-| thread_id | checkpoint_ns | checkpoint_id | parent_checkpoint_id | type | checkpoint | metadata |
-|---|---|---|---|---|---|---|
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `NULL` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.312955+00:00',` | `{'source': 'input', 'step': -1, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:50:02.313629+00:00',` | `{'source': 'loop', 'step': 0, 'parents': {}}` |
-| `20261028-215002-2569` |  | `1f1d319c-ee88-6ade-8001-28d70e8f396a` | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `msgpack` | `{'v': 4, 'ts': '2026-10-28T21:52:02.418531+00:00',` | `{'source': 'loop', 'step': 1, 'parents': {}}` |
-
-
-### 表：`writes`
-
-| thread_id | checkpoint_ns | checkpoint_id | task_id | task_path | idx | channel | type | value |
-|---|---|---|---|---|---:|---|---|---|
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 0 | `task` | `msgpack` | `build a word-count CLI tool` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 1 | `run_id` | `msgpack` | `20261028-215002-2569` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 2 | `iteration` | `msgpack` | `0` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 3 | `plan_approval` | `msgpack` | `True` |
-| `20261028-215002-2569` |  | `1f1d3198-751e-6214-bfff-692d7ccf9fea` | `fda54edf-3a0d-0078-9166-043b41b61cbc` | `~__pregel_pull, __start__` | 4 | `branch:to:planner` | `null` |  |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `30216ee0-e441-5363-314d-10d01cc85291` | `~__pregel_pull, planner` | 0 | `plan` | `msgpack` | `app_name='word-count' summary='A small standard-li` |
-| `20261028-215002-2569` |  | `1f1d3198-751f-6c6e-8000-dda7f0ef6d01` | `30216ee0-e441-5363-314d-10d01cc85291` | `~__pregel_pull, planner` | 1 | `branch:to:approve_plan` | `null` |  |
-| `20261028-215002-2569` |  | `1f1d319c-ee88-6ade-8001-28d70e8f396a` | `8e0622f1-964c-b699-3aff-808c5686e312` | `~__pregel_pull, approve_plan` | -3 | `__interrupt__` | `msgpack` | `[Interrupt(value={'plan': {'app_name': 'word-count'` |
-
-
-thread_id就是我们的一次执行，checkpoint_id可以对应到一个Graph的节点，checkpoint是我们最感兴趣的
-让我们展开最后一个checkpoint
-···
-    'v': 4, 
-    'ts': '2026-10-28T21:52:02.418531+00:00', 
-    'id': '1f1d319c-ee88-6ade-8001-28d70e8f396a', 
-    'channel_values': {
-        'task': 'build a word-count CLI tool', 
-        'run_id': '20261028-215002-2569', 
-        'plan': Plan(app_name='word-count', summary='A small standard-library-only CLI that counts words in text supplied as arguments or read from files, with optional filtering of short words and support for common plain-text encodings.', cli_commands=['python app.py count "Hello, world!"', 'python app.py count --min-length 3 "a be cat"', 'python app.py count --ignore-case "Hello hello"', 'python app.py count notes.txt', 'python app.py count notes.txt another.txt', 'python app.py count --stdin', 'python app.py count --min-length 3 --ignore-case notes.txt'], files=[FileSpec(path='app.py', description='CLI entry point and reusable functions. Implement count_words(text, min_length=1, ignore_case=False) to split text on whitespace and count words meeting the minimum length; read_text(path) to read UTF-8 text files with a clear error for missing/unreadable files; and build_parser()/main(argv=None) using argparse with a count subcommand. Accept one or more text arguments and/or file paths, plus --stdin to read standard input, --min-length (non-negative integer), and --ignore-case. Print a total word count and, when multiple inputs are supplied, a per-input breakdown. Handle empty input and file errors with friendly messages and non-zero exit codes.')]), 
-        'iteration': 0, 
-        'plan_approval': True, 
-        'branch:to:approve_plan': None
-    }, 
-    'channel_versions': {
-        '__start__': '00000000000000000000000000000002.0.73221403814305', 
-        'task': '00000000000000000000000000000002.0.73221403814305', 
-        'run_id': '00000000000000000000000000000002.0.73221403814305', 
-        'iteration': '00000000000000000000000000000002.0.73221403814305', 
-        'plan_approval': '00000000000000000000000000000002.0.73221403814305', 
-        'branch:to:planner': '00000000000000000000000000000003.0.45862768924600783', 
-        'plan': '00000000000000000000000000000003.0.45862768924600783', 
-        'branch:to:approve_plan': '00000000000000000000000000000003.0.45862768924600783'
-    }, 
-    'versions_seen': {
-        '__input__': {}, 
-        '__start__': {'__start__': '00000000000000000000000000000001.0.7110444538049118'}, 
-        'planner': {'branch:to:planner': '00000000000000000000000000000002.0.73221403814305'}
-    }, 
-    'updated_channels': ['branch:to:approve_plan', 'plan']
-···
-
-
-- `channel_values`：当前所有状态 channel 的值
-- `updated_channels`：这个 checkpoint 中哪些 channel 发生了变化
-- `channel_versions`：各 channel 的版本号
-- `versions_seen`：各节点已经消费过哪些版本
-
-channel可以理解为当前节点的是个属性？？，
-checkpoints表的每一条记录就是一个当前节点的快照，在恢复Graph时，LangGraph可以快速的查找到当前节点，依赖 `channel_values` 中的信息快速重建Graph状态。
-
-
-
-而writes表中保存有和他关联的checkpoint的具体对channel值的更改信息，每个channel的一个更改一条记录，依靠writes表可以一步一步的重放Graph的历史
-
-在仔细研究存储内容之前，我以为里面只保留了最后一步的State值，一看才知道是我浅薄了，原来checkpoints的设计不止可以resume中断的状态，还可以一步一步回溯Graph的执行
-
-可以优化改进流程，审计操作，很多的应用场景
-
-
-
 # 从 AI Coding 到 AI 开发团队：Graph 的恢复
 
 在上一篇文章中，我们通过引入 Checkpointer 和 Graph 的 `interrupt()` 机制，让 AIDevTeam 可以暂停工作流，等待人工审批，再继续执行。
@@ -213,15 +67,15 @@ def persistent_checkpointer(
 
 因此，我给 AIDevTeam 增加了 `list` 命令，主要完成三件事：
 
-1. 从 checkpoint 存储中获取当前存在的工作流线程。
+1. 从 checkpoint 存储中获取当前存在的工作流。
 2. 根据对应的 `thread_id`，调用 LangGraph 的 `get_state()` 获取工作流状态。
 3. 根据状态快照及其执行信息，整理并展示任务状态。
 
 这里需要区分两个概念：`thread_id` 用于标识一条工作流线程，而 checkpoint 是这条线程在某个时刻保存的状态快照。
 
-通过 `get_state()`，我们可以读取对应线程最近保存的状态，并进一步判断工作流是否已经结束、是否还需要恢复，以及是否存在等待处理的中断。
+通过 `get_state()`，我们可以读取对应thread最近保存的状态，并进一步判断工作流是否已经结束、是否还需要恢复，以及是否存在等待处理的中断。
 
-这让原本只能通过日志观察的任务，开始具备了基本的查询和管理能力。
+这让原本只能通过日志观察的任务，开始具备了简单的查询和管理能力。
 
 ### 3. 增加 Resume 命令
 
@@ -322,35 +176,40 @@ _approval_loop(
 
 ```python
 {
-    "v": 4,
-    "ts": "2026-10-28T21:52:02.418531+00:00",
-    "id": "1f1d319c-ee88-6ade-8001-28d70e8f396a",
-
-    "channel_values": {
-        "task": "build a word-count CLI tool",
-        "run_id": "20261028-215002-2569",
-        "plan": Plan(...),
-        "iteration": 0,
-        "plan_approval": True,
-        "branch:to:approve_plan": None,
-    },
-
-    "channel_versions": {
-        "task": "...",
-        "run_id": "...",
-        "plan": "...",
-        "iteration": "...",
-    },
-
-    "versions_seen": {
-        "__start__": {...},
-        "planner": {...},
-    },
-
-    "updated_channels": [
-        "branch:to:approve_plan",
-        "plan",
-    ],
+    'v': 4,    
+    'ts': '2026-10-28T21:52:02.418531+00:00',    
+    'id': '1f1d319c-ee88-6ade-8001-28d70e8f396a',    
+    'channel_values': {        
+        'task': 'build a word-count CLI tool',        
+        'run_id': '20261028-215002-2569',        
+        'plan': Plan(
+                  app_name='word-count', 
+                  summary='A small standard-library-only CLI that counts words in text supplied as arguments or read from files, with optional filtering of short words and support for common plain-text encodings.', 
+                  cli_commands=['python app.py count "Hello, world!"', 'python app.py count --min-length 3 "a be cat"', 'python app.py count --ignore-case "Hello hello"', 'python app.py count notes.txt', 'python app.py count notes.txt another.txt', 'python app.py count --stdin', 'python app.py count --min-length 3 --ignore-case notes.txt'], 
+                  files=[FileSpec(path='app.py', description='CLI entry point and reusable functions. Implement count_words(text, min_length=1, ignore_case=False) to split text on whitespace and count words meeting the minimum length; read_text(path) to read UTF-8 text files with a clear error for missing/unreadable files; and build_parser()/main(argv=None) using argparse with a count subcommand. Accept one or more text arguments and/or file paths, plus --stdin to read standard input, --min-length (non-negative integer), and --ignore-case. Print a total word count and, when multiple inputs are supplied, a per-input breakdown. Handle empty input and file errors with friendly messages and non-zero exit codes.')]
+                  ),
+        'iteration': 0,        
+        'plan_approval': True,        
+        'branch:to:approve_plan': None    
+    },    
+    'channel_versions': {        
+        'start': '00000000000000000000000000000002.0.73221403814305',        
+        'task': '00000000000000000000000000000002.0.73221403814305',        
+        'run_id': '00000000000000000000000000000002.0.73221403814305',        
+        'iteration': '00000000000000000000000000000002.0.73221403814305',        
+        'plan_approval': '00000000000000000000000000000002.0.73221403814305',        
+        'branch:to:planner': '00000000000000000000000000000003.0.45862768924600783',        
+        'plan': '00000000000000000000000000000003.0.45862768924600783',        
+        'branch:to:approve_plan': '00000000000000000000000000000003.0.45862768924600783'    
+    },    
+    'versions_seen': {        
+        'input': {},        
+        'start': {'start': '00000000000000000000000000000001.0.7110444538049118'},        
+        'planner': {'branch:to:planner': '00000000000000000000000000000002.0.73221403814305'}    
+    },    
+    'updated_channels': [
+        'branch:to:approve_plan', 'plan'
+    ]
 }
 ```
 
@@ -417,8 +276,4 @@ LangGraph 使用这些版本信息来追踪状态变化，并判断不同节点�
 
 这也是为什么在 AIDevTeam 中，我们既需要可靠的状态持久化，也需要继续做好执行权限控制、操作审计和必要的人工审批。
 
-下一步，我想继续探索的是：在已经具备持久化和恢复能力的基础上，能否进一步利用这些机制，让工作流更容易调试、更容易观察，也更容易从失败中恢复。
-
-毕竟，让 AI 自动完成任务只是第一步。
-
-让它能够在服务重启后继续工作，并且让我们看清它究竟做过什么，才更接近一个真正可用的 AI 开发团队。
+同时可以看到所有的State信息都会落库，所以在向State中保存信息时，我们也要衡量是否是敏感信息，信息的安全性也需要得到充分的考虑
