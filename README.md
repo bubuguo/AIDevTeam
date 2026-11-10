@@ -28,14 +28,14 @@
 
 之前在 `llm.py` 中，我们直接使用 `ChatOpenAI` 创建模型实例，然后将其交给各个 Agent 使用。
 
-这种方式虽然简单，但有一个问题：LLM 的调用分散在不同的 Agent 中，我们很难统一观察每次调用的情况。
+这种方式虽然简单，但是我们对LLM的调用完全没有监控，处于盲操的情况
 
-因此，这次增加一个包装类 `MonitoredLLM`，将原始 LLM 包装起来。
+因此，这次增加一个包装类 `MonitoredLLM`，将原始 LLM 调用包装起来。
 
 它主要负责两件事情：
 
-1. 包装原始 LLM 的调用方法。
-2. 在调用完成后统计输入和输出 Token 数量。
+1. 包装原始 LLM 的调用方法
+2. 在调用完成后统计输入和输出 Token 数量
 
 Token 统计这里使用了 `tiktoken` 提供的 `count_tokens` 方法。
 
@@ -46,47 +46,54 @@ Token 统计这里使用了 `tiktoken` 提供的 `count_tokens` 方法。
 整体思路如下：
 
 ```python
-class MonitoredLLM:
+class MonitoredLLM: 
+    ...
 
-    def __init__(self, llm):
-        self.llm = llm
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        node = self._node_name()
+        model = self.model
+        input_text = _flatten_text(input)
+        input_tokens = self.count_tokens(input_text, model)
 
-    def invoke(self, messages, config=None, **kwargs):
-        response = self.llm.invoke(
-            messages, config=config, **kwargs
+        if config is not None:
+            output = self.wrapped.invoke(input, config=config, **kwargs)
+        else:
+            output = self.wrapped.invoke(input, **kwargs)
+
+        output_text = _flatten_text(output)
+        output_tokens = self.count_tokens(output_text, model)
+        context_monitor.record(
+            node,
+            input_tokens,
+            output_tokens,
+            model=model,
+            context_limit=self._context_limit,
         )
+        return output
 
-        # 统计输入和输出 Token
-        input_tokens = count_tokens(messages)
-        output_tokens = count_tokens(response.content)
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        node = self._node_name()
+        model = self.model
+        input_text = _flatten_text(input)
+        input_tokens = self.count_tokens(input_text, model)
 
-        print(
-            f"LLM Tokens: "
-            f"input={input_tokens}, "
-            f"output={output_tokens}"
+        if config is not None:
+            output = await self.wrapped.ainvoke(input, config=config, **kwargs)
+        else:
+            output = await self.wrapped.ainvoke(input, **kwargs)
+
+        output_text = _flatten_text(output)
+        output_tokens = self.count_tokens(output_text, model)
+        context_monitor.record(
+            node,
+            input_tokens,
+            output_tokens,
+            model=model,
+            context_limit=self._context_limit,
         )
-
-        return response
-
-    async def ainvoke(self, messages, config=None, **kwargs):
-        response = await self.llm.ainvoke(
-            messages, config=config, **kwargs
-        )
-
-        # 统计输入和输出 Token
-        input_tokens = count_tokens(messages)
-        output_tokens = count_tokens(response.content)
-
-        print(
-            f"LLM Tokens: "
-            f"input={input_tokens}, "
-            f"output={output_tokens}"
-        )
-
-        return response
+        return output
+    ...
 ```
-
-这里展示的是核心逻辑，实际实现中还需要根据项目使用的消息类型处理输入内容，并考虑异常处理以及其他 Runnable 接口的兼容性。
 
 另外，为什么选择在原始方法执行完成后统计？
 
@@ -95,8 +102,6 @@ class MonitoredLLM:
 这样一来，当某个 Module 执行失败时，我们就可以观察它之前的 LLM 调用情况。
 
 如果输入 Token 持续增长，就需要重点关注 Context Window 是否接近上限；如果 Token 数量并不异常，却频繁出现调用失败，则可以进一步检查模型服务、网络连接以及 API 返回错误。
-
-当然，Token 数量只能帮助我们缩小排查范围，并不能直接判断错误原因。后续还需要进一步记录模型名称、调用耗时、异常信息等数据。
 
 至少现在，我们不再是完全摸黑排查了。
 
@@ -121,9 +126,7 @@ Expecting value: line 1 column 38 (char 37)
 
 这让我开始怀疑，不同模型在处理 Structured Output 时，对底层编码方式的支持可能存在差异。
 
-之前使用的是默认的 Structured Output 实现，而 LangChain 的 `with_structured_output()` 支持指定不同的实现方式。
-
-这次改为显式使用 `json_schema`：
+之前使用的是 `function_calling` 的方式，而这次改为使用 `json_schema`：
 
 ```python
 llm.with_structured_output(
@@ -155,14 +158,12 @@ Coder 负责实现代码，Tester 根据实现生成测试用例，最后 Review
 之前的 Graph 大致是这样的：
 
 ```text
-       ┌─────────┐
-       ▼         │
-Plan → Coder → Tester → Reviewer
-         ▲                 │
-         └─────────────────┘
-                           │
-                           ▼
-                          End
+  ┌─────────┐           ┌─────────────┐
+  ▼         │           ▼             │
+Plan → Plan Approve → Code → Test → Review
+                                      │
+                                      ▼
+                                     End
 ```
 
 当 Reviewer 发现问题时，工作流会重新返回 Coder。
@@ -174,7 +175,6 @@ Plan → Coder → Tester → Reviewer
 例如：
 
 - 测试断言与实际需求不一致。
-- 测试用例没有覆盖必要的场景。
 - 测试代码本身无法正常运行。
 
 这些问题实际上应该由 Tester 负责修复。
@@ -275,47 +275,11 @@ context[]: 959 in + 1197 out = 2156 tokens
 
 这样在不同 Module 之间切换时，可以比较直观地看到各个 Agent 的 Context 使用情况。
 
-尤其是当某个任务执行时间比较长时，可以观察输入 Token 是否随着迭代不断增长。
+尤其是当某个任务执行时间比较长时，可以观察输入 Token 使用是否过高。
 
 这也为后续优化 Context 提供了一个比较明确的方向。
 
-### 2. function_calling vs. json_schema
-
-除了监控问题，这次还顺手解决了一个之前一直比较困扰我的问题。
-
-在不同模型之间切换时，我发现 Structured Output 偶尔会出现一些奇怪的解析错误。
-
-例如：
-
-```
-Value error, files must be a list or a JSON-encoded list string:
-Expecting value: line 1 column 38 (char 37)
-
-[type=value_error, input_value='[{"path": "wordcount.py"...ys.exit(main())\\n\\"}]', input_type=str]
-```
-
-从错误信息来看，原本应该返回一个 List 的字段，却被模型返回成了无法正常解析的字符串。
-
-看起来不同模型对 function_calling 的返回格式处理存在一定差异，而 LangChain 在解析这些结果时，也可能受到模型具体实现的影响。
-
-因此，这次尝试换一种方式，显式指定使用 json_schema：
-
-llm.with_structured_output(
-    schema,
-    method="json_schema"
-)
-
-与 function_calling 不同，json_schema 通过 JSON Schema 约束模型的输出结构，而不是通过工具调用的形式获取结构化结果。
-
-目前在我的实际使用中，切换到 json_schema 后，观察到的结果比之前稳定。
-
-测试了 4、5 种不同的模型，没有再出现之前类似的 List 解析错误。
-
-当然，这并不意味着 json_schema 一定比 function_calling 更好。不同模型对结构化输出的支持程度不同，实际项目中还是需要根据模型能力进行测试。
-
-不过，至少对于当前的 AIDevTeam 来说，这个调整解决了一个比较明显的兼容性问题。
-
-### 3. Reviewer 可以直接返回 Tester
+### 2. Reviewer 可以直接返回 Tester
 
 ![新流程](./docAsset/graph.png)
 
