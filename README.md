@@ -1,470 +1,310 @@
-
 # 从 AI Coding 到 AI 开发团队：接入外部需求管理
 
-在上一篇文章中，我们通过对使用数据库代替MemorySaver使得我们的AI团队可以从宕机，重启等异常条件中继续进行工作。鲁棒性有了一大步的提升
-为进行大规模开发奠定了第一步基础
+在上一篇文章中，我们通过两个小改动让 AI 团队的鲁棒性有了很大的提升，也为后续承担更大规模的开发任务打下了基础。
 
-但是且慢，为了使我们的AI团队更加正规，这周将需求管理列为改造的重点。自然Github的提供的Issue功能因为其超高的性价比（免费）成了我的选择
+不过，仔细想想，现在的 AIDevTeam 仍然存在一个比较明显的问题：
+
+用户通过 CLI 提交 Idea，Planner 生成开发计划，人工审批之后进入编码、测试和 Review。整个过程虽然已经具备了一定的自主性和人工参与能力，但需求、计划、反馈以及执行状态，基本都围绕着内部的 LangGraph 工作流展开。
+
+这在 Toy 阶段没有什么问题，但如果希望 AI 团队真正参与到日常软件开发中，仅仅能够独立完成编码还不够。
+
+一个正规的开发团队，除了开发人员，还需要需求管理、任务跟踪、过程记录以及与外部人员协作的能力。
+
+我们也应该给 AI 团队补上这些能力。
+
+因此，这周将需求管理列为了改造重点。
+
+经过一番考虑，GitHub 自带的 Issue 功能凭借其简单、易用以及超高的性价比（免费），自然成为了这次的选择。
+
+不过，这次改造真正的重点并不是接入 GitHub API，而是一次架构上的调整：
+
+**将需求管理从 AI 工作流内部迁移到外部系统。**
+
+之前，工作流既负责执行任务，也负责维护需求上下文。现在，我们把需求交给 GitHub Issue 管理，LangGraph 则专注于工作流的执行。
+
+这样，AI 团队就不再是一个只能通过 CLI 启动、只能在内部完成任务的封闭系统，而是开始具备与外部系统协作的能力。
+
+这也是 AIDevTeam 从 AI Coding 工具向 AI 开发团队演进的重要一步。
 
 ## 一、代码改造
 
-### 1. 定义协议
+### 1. 重新定义工作流程
 
-本次改造的核心是建立统一的协议，明确内部工作流与外部GitHub Issue的交互方式。经过深入分析，我们放弃了最初使用Agent+MCP调用GitHub API的想法，转而采用确定的REST API行为，原因如下：
+先回顾一下之前的工作流程。
 
-1. **不要为用Agent+MCP而用Agent+MCP**：模型驱动的函数调用往往缺乏确定性，同一请求可能得到不同的结果，难以保证行为的可预测性。
-
-2. **确定的行为使用确定的API**：将每一个具体的操作（创建、查询、更新、评论）都映射到具体的HTTP方法和端点，避免模型对API的误解或错误调用。
-
-3. **安全无歧义**：通过API的认证和权限控制，而不是依赖模型对API参数的理解，消除因模型解释不一致而产生的安全风险。
-
-4. **可追踪性**：所有的需求操作都有明确的请求路径和响应结构，便于日志记录、审计和调试。
-
-**定义的协议体系**：
-
-**Issue 标签体系**：
-- `requirement`：功能需求标签，区分不同类型的开发需求
-- `task`：具体任务标签，用于跟踪任务的执行状态
-- `approval`：人工审批标签，标记需要人工介入的节点
-
-**Issue 字段定义**：
-```yaml
-title: "[需求] <简短描述>"
-body:
-  - label: "需求类型"
-    description: "需求的大类（如: feature, bug, improvement）"
-  - label: "优先级"
-    description: "P0/P1/P2/P3，表示优先级别"
-  - label: "预期产出"
-    description: "期望生成的功能或代码的简要描述"
-  - label: "接受标准"
-    description: "验收任务的具体标准，用于判断任务是否完成"
+```text
+  ┌─────────┐           ┌──────┬──────┐
+  ▼         │           ▼      ▼      │
+Plan → Plan Approve → Code → Test → Review
+                                      │
+                                      ▼
+                                     End
 ```
 
-**REST API 行为约定**：
-- `GET /repos/{owner}/{repo}/issues`：列出项目下的需求Issue
-- `POST /repos/{owner}/{repo}/issues`：创建新的需求Issue
-- `GET /repos/{owner}/{repo}/issues/{issue_number}`：获取指定Issue的详细信息
-- `PATCH /repos/{owner}/{repo}/issues/{issue_number}`：更新Issue的标签、状态或其他属性
-- `POST /repos/{owner}/{repo}/issues/{issue_number}/comments`：在Issue中添加评论，用于节点间的反馈交流
+这是上一次改造后的流程。
 
-### 2. 优化State
+用户通过 CLI 提交 Idea，Planner 根据 Idea 生成开发计划，然后通过 `interrupt()` 暂停工作流，等待人工审批。审批通过后，继续进入编码、测试和 Review 阶段。
 
-这次改造的核心副产品是：**将需求信息从内部State中剥离，存入GitHub Issue中作为中期记忆。**
+整个过程虽然已经支持人工参与，但所有的操作基本都发生在本机，需求和开发计划也没有一个统一的外部管理入口。
 
-**优化前的问题**（v1-v3版本）：
-- TeamState承载了任务的全部上下文：从用户需求、开发计划到迭代反馈
-- 每次工作流重启或线程切换时，都需要重新搬运这些信息
-- 消耗宝贵的LLM token，且上下文容易被各类执行细节稀释
-- 随任务复杂度增加，信息检索和重用变得日益困难
+这次改造后，流程变成了这样：
 
-**优化后的设计**：
+```text
+             ┌───────────┐            ┌──────┬──────┐
+             ▼           │            ▼      ▼      │
+   Idea     Plan     Plan Approve → Code → Test → Review
+     │       │           ▲                          │
+     ▼       ▼           │                          ▼
+  ┌───────────────────────────┐                    End
+  │        GitHub Issue       │                          
+  └───────────────────────────┘    
+```
 
-**State 中不再存储的内容**：
-- 完整的需求文本描述
-- 冗余的执行历史和中间结果
-- 与Issue关联的元数据（这些现在由GitHub Issue管理）
+这里有几个关键变化。
 
-**State 中保留的精简内容**：
-- **Issue 引用**：Issue的URL或编号，作为指向外部记录的指针，占用极少token
-- **上下文摘要**：需求的关键要点摘要（1-2句话），用于快速定位和判断是否需要拉取完整信息
-- **执行状态**：当前任务在工作流中的位置（plan、code、test、review等），用于协调工作流流转
-- **迭代计数**：当前的迭代次数，用于跟踪修改历史和避免无限循环
-- **临时执行上下文**：当前节点正在处理的短期信息，如当前测试的具体错误模式
+首先，用户不再直接通过 CLI 提交 Idea，而是新建一个 GitHub Issue，将需求写在 Issue 中。
 
-**State 结构优化示例**：
+随后，AI Planner 根据 Issue 中的需求生成开发计划，并通过 Comment 的方式发布到对应的 Issue。
+
+用户可以直接在 GitHub 上查看计划。如果认为计划不合理，就通过 Comment 提出修改意见；如果认为计划已经足够完善，则可以通过相应的审批操作批准当前计划。
+
+之后，AI 团队再进入原来的 Code、Test 和 Review 流程。
+
+最大的区别在于：**从 Idea 的提出，到开发计划的生成、修改和审批，所有重要信息都保存在我们选定的外部需求管理平台上。**
+
+这里其实发生了一个比较重要的变化：需求不再是简单的一个命令行描述，而是具备了集成三方专业需求管理的能力。
+
+之前，用户提交 Idea 后，Planner 将开发计划写入 State，用户的反馈也通过工作流传递。需求信息和执行状态混在了一起。
+
+现在，我们将这两部分职责进行了拆分：
+
+- **外部需求管理系统**：负责需求的创建、维护、计划评审、反馈以及历史记录。
+- **内部 AI 工作流**：负责读取需求、制定计划、执行开发、测试和 Review。
+
+两者通过 Issue ID 建立关联。
+
+这样的设计有一个很重要的好处：需求不再依赖某一次工作流执行而存在。
+
+即使 Graph 执行结束、进程重启，甚至未来我们更换底层的工作流引擎，需求及其历史记录仍然保存在 GitHub Issue 中。
+
+反过来，如果未来我们不再使用 GitHub，而是换成 Jira 或其他需求管理系统，原则上也只需要替换外部需求管理的适配部分，而不需要重新设计整个 AI 开发流程。
+
+当然，这次还没有专门实现一套通用适配层，但架构上已经开始朝这个方向演进。
+
+这里需要说明的是，Plan Approve 仍然使用 LangGraph 的 `interrupt()` 机制。
+
+因此，工作流执行到审批节点时依然会暂停。用户在 GitHub Issue 上完成 Reject 或 Approve 后，目前还需要通过 CLI 手动 Resume 对应的 Graph。
+
+看起来这次改造反而增加了几个操作步骤。
+
+但从实际业务角度来看，这些步骤完全可以通过 GitHub 的 Label、Webhook 等机制进一步自动化。
+
+例如，当用户给 Issue 添加 `approved` 标签时，通过 Webhook 通知 CLI 服务，自动恢复对应的 LangGraph 工作流。
+
+这样，整个过程就可以变成：
+
+用户提交 Issue → AI 生成计划 → 用户审批 → AI 自动继续执行。
+
+当然，这次先把基本流程跑通，自动化的事情就简单多了。
+
+### 2. 定义 GitHub Issue 交互协议
+
+确定了整体流程，接下来需要解决一个问题：AI 团队应该如何读写 GitHub Issue？
+
+如果只是简单地把 Issue 当成一个文本存储空间，显然是不够的。
+
+因为 GitHub Issue 的主要使用者还是人类，我们希望 Issue 中的信息能够方便人类阅读；但与此同时，AI 团队也需要能够准确地读取之前生成的开发计划和审批意见。
+
+因此，这次需要定义一套交互协议，规范各个节点如何读取和写入 GitHub Issue。
+
+主要包括三个方面。
+
+**第一，将 Issue ID 作为唯一标识。**
+
+之前我们使用 `run_id` 标识一次工作流执行。
+
+现在既然一个需求对应一个 GitHub Issue，那么就没有必要再额外维护一套标识了。
+
+直接使用 GitHub Issue ID 作为任务的标识，并且让 LangGraph 中的 `thread_id` 与 Issue ID 保持一致。
+
+这样，外部需求和内部工作流就建立了直接关联。
+
+后续无论是读取 Issue、更新 Comment，还是恢复之前暂停的工作流，都可以通过同一个 Issue ID 找到对应的任务。
+
+**第二，修改工作流启动入口。**
+
+之前 CLI 的启动方式是直接传入 Idea 的文本描述。
+
+现在则改为传入 GitHub Issue ID。
+
+也就是说，CLI 不再负责接收和管理需求内容，而是根据 Issue ID 从 GitHub 获取对应的需求信息，再启动工作流。
+
+这样做的一个好处是，CLI 不需要关心需求内容本身，只需要知道当前要处理哪个 Issue。
+
+**第三，统一 Plan 的发布格式。**
+
+Planner 生成开发计划后，需要将计划发布到 GitHub Issue 的 Comment 中。
+
+这里采用了一个比较简单的设计：将 Comment 分成两个部分。
+
+第一部分是自然语言描述，主要面向人类。
+
+例如：
+
+- 本次开发的目标。
+- 计划实现的功能。
+- 具体的开发步骤。
+- 需要注意的问题。
+
+第二部分是 JSON 格式的结构化数据，主要面向 AI 团队后续的节点。
+
+例如：
+
+```json
+{
+  "app_name": "sudoku9",
+  "summary": "生成标准 9x9 数独的命令行工具。程序先用随机化回溯生成一个完整合法的终盘（解），再按用户指定的已填数字个数（clues）逐格挖空，且每挖一格都用解计数器验证谜面仍只有唯一解；若目标格数无法达到（如低于唯一解下限），则返回能达到的最佳结果并提示。支持随机种子以便复现，可选隐藏答案、输出到文件。核心逻辑（棋盘表示、终盘生成、唯一解挖洞、格式化）全部放在 sudoku.py 的纯函数中，app.py 只负责 argparse 参数解析与打印。",
+  "cli_commands": [],
+  "files": [
+    {
+      "path": "sudoku.py",
+      "description": "纯逻辑模块（仅标准库）：棋盘用长度 81 的 list[int]（0 表示空）。提供：generate_solution(rng) 随机回溯生成完整终盘；count_solutions(board, limit=2) 解计数回溯（用于唯一性验证）；make_puzzle(clues, rng) 从终盘随机挖空至目标已填格数，保持唯一解，返回 (puzzle, solution, achieved_clues)；clues_count(board) 统计已填格数；format_board(board) 输出带 3x3 宫分隔线的棋盘（空格显示为 '.'）。"
+    },
+    {
+      "path": "app.py",
+      "description": "CLI 入口（argparse）：build_parser() 定义参数 --clues/-c（已填数字个数，默认 30，合法范围 17–81）、--seed（随机种子，可复现）、--hide-solution（不打印答案）、--output（写入文件）；main(argv=None) 调用 sudoku.make_puzzle 生成谜面，打印谜面与答案（除非隐藏），若 achieved_clues < clues 则打印警告；返回退出码。参数解析与逻辑分离，函数均可被测试直接导入。"
+    }
+  ]
+}
+```
+
+这样，Planner、Coder 和 Tester 就可以按照统一的格式读取开发计划，而不需要每次都从自然语言描述中重新理解任务。
+
+人类可以直接阅读 Comment，AI 则可以读取其中的 JSON 数据。
+
+两者使用同一份信息，避免了需求描述和机器实际执行内容之间出现偏差。
+
+当然，这只是当前版本的协议。后续随着功能进行演化增加，所以我们以注释的方式在 Comment 最后增加了当前协议的版本号，既不影响人类对Comment的阅读，又让机器方便的识别。
+
+```
+<!-- aidevteam: v1:plan -->
+```
+
+### 3. State 轻量化：将需求上下文从工作流中剥离
+
+前面解决了 GitHub Issue 的读写问题，接下来还有一个值得关注的地方：LangGraph 的 State。
+
+还记得之前的设计吗？
+
+我们将开发计划、用户反馈以及审批记录等信息都保存在 State 中。
+
+这种设计在最初没有什么问题，但随着需求管理功能的加入，State 中保存的信息越来越多。
+
+实际上，这些信息并不都属于工作流执行状态。
+
+例如，开发计划和用户的审批意见，本质上是需求管理信息。它们需要长期保存、随时查询，而且可能在多次工作流执行之间持续存在。
+
+如果继续把这些内容全部放在 LangGraph State 中，就会产生两个问题：
+
+1. State 越来越臃肿，增加了状态持久化和恢复的负担。
+2. 需求信息与工作流执行状态耦合在一起，不方便独立管理和复用。
+
+因此，这次对 State 做了一次轻量化改造。
+
+我们将需求相关的信息统一定义为 `IssueContext`，需要使用时直接从 GitHub Issue 中读取，而不是一直保存在 State 中。
+
+State 则只保留当前工作流真正需要的执行信息。
+
+新的 `TeamState` 定义如下：
 
 ```python
 class TeamState(TypedDict, total=False):
-    """精简后的工作流状态，仅包含执行必需的核心信息"""
-    
-    # 指向外部记录的引用
-    issue_number: int  # GitHub Issue编号
-    issue_url: str     # GitHub Issue的URL
-    
-    # 核心执行状态
-    task: str          # 简短的任务描述（不超过50字符）
-    iteration: int     # 当前迭代次数
-    approved: bool     # 是否通过审查
-    
-    # 执行过程中的临时信息
-    current_focus: str # 当前节点关注的点
-    last_feedback: str # 上一次的反馈摘要
+    issue_id: int
+    code: CodeResult
+    test_report: TestReport
+    review: Review
+    approved: bool
+    plan_approved: bool
+    iteration: int
 ```
 
-**优化带来的效果**：
-- 单次上下文长度控制在合理范围（例如 < 8k tokens）
-- 需求信息不再因工作流重启而丢失或稀释
-- 新成员可以通过Issue历史快速了解项目背景
-- 真正实现“context时最贵的资源”这一原则的落地
-
-### 3. CLI 改造
-
-为了支持Issue驱动的工作流，CLI需要新增几个核心命令，并重构原有的工作流入口。
-
-**新增命令结构**：
-
-```bash
-# 创建新需求
-AIDevTeam$ python -m aidevteam.cli requirement create "创建 JSON 格式化工具"
-# 系统后台自动：
-# 1. 调用 REST API: POST /repos/{owner}/{repo}/issues
-# 2. 返回Issue编号和URL
-# 3. 标记相应的label（requirement, task等）
-# 4. 输出创建结果给用户
-
-# 列出当前活跃需求
-AIDevTeam$ python -m aidevteam.cli requirement list
-# 1. 读取数据库，获得当前所有执行的thread_id
-# 2. 通过Graph的get_state方法重建存储的Graph状态
-# 3. 便利所有的Graph状态，并展示Issue编号、当前状态、迭代次数
-# 4. 输出格式化的需求列表
-
-# 根据 Issue 启动工作流
-AIDevTeam$ python -m aidevteam.cli run --issue 123
-# 1. 通过 REST API GET /repos/{owner}/{repo}/issues/123 获取Issue内容
-# 2. 解析关键信息（需求描述、优先级、接受标准等）
-# 3. 将解析结果同步到工作流 State 中：
-#    - state["issue_number"] = 123
-#    - state["issue_url"] = "https://github.com/.../issues/123"
-#    - state["task"] = parsed_requirement_summary
-# 4. 启动工作流：Plan → Code → Test → Review
-# 5. 每个节点都可以通过Issue评论进行反馈和协作
-
-# 更新需求状态
-AIDevTeam$ python -m aidevteam.cli requirement update 123 --status "approved"
-# 1. CLI调用 REST API: PATCH /repos/{owner}/{repo}/issues/123
-# 2. 请求体: {"state": "closed", "labels": ["completed"]}
-# 3. Issue关闭，任务标记为 completed
-# 4. 记录本次更新的时间和原因
-
-# 查看 Issue 详情
-AIDevTeam$ python -m aidevteam.cli requirement show 123
-# 1. 获取Issue详细信息
-# 2. 显示当前工作流状态
-# 3. 展示相关的评论历史
-# 4. 显示迭代进度
-
-# 恢复中断的工作流
-AIDevTeam$ python -m aidevteam.cli run --issue 123 --resume 3
-# 1. 自动检测Issue #123是否有关联的工作流状态
-# 2. 如果Issue仍然打开：询问是否继续进行中的任务
-# 3. 如果Issue已关闭：询问是否创建新任务或重新打开
-# 4. 恢复到第3次迭代的状态，同步当前 State: iteration=3
-```
-
-**CLI 与工作流的集成**：
-
-CLI 不再是单纯的任务启动入口，而是成为了管理外部需求与内部工作流之间桥梁的工具：
-
-1. **需求同步**：CLI 负责将GitHub Issue的内容解析并同步到当前的工作流 State中，确保工作流始终基于最新的需求信息。
-
-2. **状态持久化**：通过Issue的状态（打开/关闭、标签）作为工作流持久化的入口，即使工作流进程重启、Pod漂移，Issue记录不受影响。
-
-3. **反馈闭环**：CLI 协调各个节点（Planner、Coder、Tester、Reviewer）通过Issue评论进行反馈，形成完整的闭环。
-
-4. **跨会话延续**：用户可以在不同的会话中通过Issue Key快速恢复上下文，无需依赖内存状态。
-
-**CLI 工作流示例**：
-
-```mermaid
-flowchart TD
-    A[CLI 命令] --> B{解析命令}
-    B -->|requirement create| C[调用 REST API 创建 Issue]
-    B -->|requirement list| D[读取数据库获取 thread_id]
-    B -->|run --issue N| E[同步 Issue 内容到 State]
-    B -->|requirement update N --status S| F[PATCH API 更新 Issue]
-    
-    C --> G[返回 Issue 编号和 URL]
-    D --> H[列出活跃需求列表]
-    E --> I[同步关键信息到 State]
-    I --> J[启动工作流：Plan → Code → Test → Review]
-    J --> K[各节点通过 Issue 评论反馈]
-    K --> L[工作流完成或需要迭代]
-    L -->|迭代| I
-    L -->|完成| M[关闭 Issue]
-    
-    style A fill:#e1f5fe
-    style M fill:#c8e6c9
-</flowchart>
+可以看到，相比之前的版本，移除了 Plan 和 Feedback 等相关字段，只保留了 `issue_id` 作为外部需求的引用。
 
-## 二、需求管理演进
+这样一来，State 就清爽多了。
 
-随着 AI 开发团队的迭代，我们从最基础的代码生成工作流，逐步意识到**上下文管理**是支撑大规模开发的关键瓶颈。之前的版本中，我们通过容器化和状态持久化解决了代码执行的安全和恢复问题，但所有的需求信息仍然散落在工作流的 State 中，随着任务复杂度增加，信息检索和重用变得日益困难。
+这里实际上完成了一次职责划分：
 
-### 1. 从 State 中抽离需求记录
+- GitHub Issue：负责保存需求、开发计划、用户反馈和审批记录。
+- LangGraph State：负责保存工作流当前执行所需的状态。
+- `thread_id`：负责将外部 Issue 与内部工作流关联起来。
 
-在 v1-v3 的版本中，我们的 TeamState 承载了任务的全部上下文：从用户需求、开发计划到迭代反馈。然而，这种设计意味着每次工作流重启或线程切换时，都需要重新搬运这些信息，不仅消耗宝贵的 token，也使得上下文容易被各类执行细节稀释。
+这样，我们不再需要依赖 LangGraph State 来保存所有的历史信息。
 
-这次改造的核心副产品是：**将需求信息从 State 中剥离，存入 GitHub Issue 中作为中期记忆。**
+需要某个历史计划时，从 Issue 中读取；需要恢复工作流时，通过 `thread_id` 找到对应的 Checkpoint。
 
-这样带来的直接好处是：
-- **Context 成本下降**：不再需要将完整的需求描述持续累加到每一次 LLM 调用的上下文中
-- **信息不被稀释**：GitHub Issue 作为独立的记忆载体，保持需求描述的纯凹和完整性
-- **跨会话延续**：即使工作流进程重启，需求记录也能通过 Issue Key 快速恢复，无需依赖内存状态
+**把长期需求上下文交给外部系统管理，把执行状态留给工作流自己管理。**
 
-### 2. 协议定义
+这应该是本次改造最重要的变化。
 
-为了确保 GitHub Issue 与内部工作流能够无缝交互，我们定义了统一的协议：
+## 二、执行效果
 
-**Issue 标签体系**：
-- `requirement`：功能需求标签
-- `task`：具体任务标签
-- `approval`：人工审批标签
+这次我选择了一个比较直观的需求：生成一个 Web 版数独游戏。
 
-**Issue 字段定义**：
-```yaml
-title: "[需求] <简短描述>"
-body:
-  - label: "需求类型"
-    description: "需求的大类"
-  - label: "优先级"
-    description: "P0/P1/P2/P3"
-  - label: "预期产出"
-    description: "期望生成的功能或代码"
-  - label: "接受标准"
-    description: "验收的标准"
-```
+首先，在 GitHub 上创建一个 Issue，描述希望实现的功能。
 
-**REST API 行为约定**：
-- `GET /repos/{owner}/{repo}/issues`：列出相关需求
-- `POST /repos/{owner}/{repo}/issues`：创建新需求
-- `GET /repos/{owner}/{repo}/issues/{issue_number}`：获取需求详情
-- `PATCH /repos/{owner}/{repo}/issues/{issue_number}`：更新需求状态
+![使用 GitHub Issue 驱动 AI 团队](./docAsset/git_issue.png)
 
-### 3. CLI 改造
+随后，通过 CLI 将 Issue ID 传给 AI 团队。
 
-为了支持 Issue 驱动的工作流，CLI 需要新增几个核心命令：
+Planner 读取 Issue 中的需求，生成开发计划，并将计划发布到对应的 Comment 中。
 
-```bash
-# 创建新需求
-AIDevTeam$ python -m aidevteam.cli requirement create "创建 JSON 格式化工具"
+我可以直接在 GitHub 上查看计划，并通过 Comment 与 Planner 进行交互，提出修改意见。
 
-# 列出当前活跃需求
-AIDevTeam$ python -m aidevteam.cli requirement list
+经过几轮调整，最终确认开发计划，审批通过后，工作流继续执行。
 
-# 根据 Issue 启动工作流
-AIDevTeam$ python -m aidevteam.cli run --issue 123
+之后就是熟悉的环节了。
 
-# 更新需求状态
-AIDevTeam$ python -m aidevteam.cli requirement update 123 --status "approved"
-```
+Coder、Tester 和 Reviewer 各司其职，完成代码实现、测试和 Review。
 
-## 三、技术实现
+最终，一个可以运行的 Web 版数独游戏就完成了。
 
-### 1. 协议定义
+![数独游戏最终效果](./docAsset/result.png)
 
-我们不再盲目使用 Agent+MCP 来调用 GitHub API，而是采用明确的 REST API 行为：
+可以看到，这次我们并没有改变原有的核心开发流程，而是通过 GitHub Issue 为它增加了一个外部需求管理入口。
 
-- **确定的行为使用确定的 API**：每一个具体的操作（创建、查询、更新、评论）都映射到具体的 HTTP 方法和端点
-- **安全无歧义**：通过 API 的认证和权限控制，而不是依赖模型的函数调用能力
-- **可追踪性**：所有的需求操作都有明确的请求路径和响应结构，便于日志记录和审计
+从需求提出、计划生成，到人工审批和后续执行，都可以在 GitHub 上找到对应的记录。
 
-### 2. State 优化
+## 三、后记：从内部工作流走向外部协作
 
-在 State 中我们不再存储完整的需求文本，而是存储：
+回顾这次改造，表面上看，我们只是给 AIDevTeam 接入了 GitHub Issue，让用户可以通过 Issue 提交需求、查看开发计划和提出修改意见。
 
-- **Issue 引用**：Issue 的 URL 或编号，作为指向外部记录的指针
-- **上下文摘要**：需求的关键要点摘要，用于快速定位
-- **执行状态**：当前任务在工作流中的位置（plan、code、test、review 等）
-- **迭代计数**：当前的迭代次数，用于跟踪修改历史
+但实际上，这次改造完成了一次比较重要的架构转变：
 
-这样设计使得 State 不再膨胀，而成为一个轻量级的执行上下文，真正实现“context 时最贵的资源”这一原则的落地。
+**将需求管理从 AI 工作流内部迁移到了外部系统。**
 
-### 3. CLI 改造
+之前，AIDevTeam 更像是一个封闭的自动化程序。用户通过 CLI 提交任务，LangGraph 负责维护任务上下文和执行状态，所有的事情都围绕着内部工作流展开。
 
-CLI 的改造重点是将 GitHub Issue 的操作流程化：
+现在，我们开始将不同职责交给更合适的系统：
 
-**新增命令结构**：
-- `requirement:*`：Issue 管理相关命令
-- `workflow:*`：工作流控制相关命令
-- `status:*`：任务状态查询相关命令
+- **GitHub Issue**：负责需求管理，保存需求、计划、反馈和审批记录。
+- **LangGraph**：负责工作流编排，管理任务执行过程和节点状态。
+- **CLI**：负责连接外部需求管理系统与内部工作流，承担任务启动和恢复的职责。
 
-**与工作流的集成**：
-CLI 不再是单纯的任务启动入口，而是成为了管理外部需求与内部工作流之间桥梁的工具。用户可以通过 CLI 查看 Issue 状态，或者将 Issue 信息同步到当前的工作流 State 中。
+这几个部分通过 Issue ID 关联起来，形成了一个相对清晰的架构。
 
-## 四、上下文管理策略
+这次改造带来的好处也不仅仅是方便管理需求：
 
-这次改造的另一个重要目标是解决“context 使用过多，冲淡各种信息”问题。
+1. **回溯与审计**：需求、开发计划和审批意见都有独立的存储位置，可以随时查看之前的决策过程。
+2. **按需读取**：Agent 不再需要一直携带所有历史需求信息，需要时从 Issue 中读取即可。
+3. **职责解耦**：需求管理与工作流执行相互独立，未来可以更换外部需求管理平台，而不必大幅修改内部 Graph。
+4. **Context 管理**：将长期需求信息从 State 中剥离，减少工作流中不必要的数据，为后续 Context 优化提供基础。
 
-**分层上下文策略**：
+更重要的是，**AI 团队终于开始具备与外部世界协作的能力。**
 
-1. **核心上下文**（始终包含在 State 中）：
-   - 当前任务的执行状态
-   - 最近的反馈和迭代信息
-   - 正在进行的计划要点
+我们可以通过 GitHub Issue 提交需求，通过 Comment 参与计划评审，未来还可以通过 Webhook、Label 等机制触发工作流，实现更加自动化的协作。
 
-2. **需求上下文**（通过 Issue 引用获取）：
-   - 完整的需求描述存储在 GitHub Issue 中
-   - 通过 `--issue` 参数或 `requirement get` 命令快速拉取
-   - 只在需要时加载，避免永久性累积
+这意味着 AIDevTeam 不再只是一个能够自动写代码的工具，而是开始拥有一个开发团队应该具备的外围协作体系。
 
-3. **历史上下文**（归档记录）：
-   - 完成任务的 Issue 关闭后，保持记录可查
-   - 通过 Issue 搜索功能回溯历史决策
+下一次，我们可以搞点大的了。
 
-**效果**：
-- 单次上下文长度控制在合理范围（例如 < 8k tokens）
-- 需求信息不再因工作流重启而丢失或稀释
-- 新成员可以通过 Issue 历史快速了解项目背景
-
-## 五、实际使用流程
-
-### 1. 创建需求 Issue
-
-```bash
-AIDevTeam$ python -m aidevteam.cli requirement create "实现一个基于规则的 JSON 格式化工具"
-# 系统自动创建 Issue 并标记相应标签
-# CLI 输出 Issue URL，例如：https://github.com/.../issues/42
-# 在后台，调用 GitHub REST API: POST /repos/{owner}/{repo}/issues
-# 返回: { "number": 42, "html_url": "https://github.com/.../issues/42", "title": "...", "labels": [...] }
-```
-
-### 2. 根据 Issue 启动工作流
-
-```bash
-AIDevTeam$ python -m aidevteam.cli run --issue 42
-# CLI 执行以下步骤：
-# 1. 通过 REST API GET /repos/{owner}/{repo}/issues/42 获取 Issue 内容
-# 2. 解析关键信息（需求描述、优先级、接受标准等）
-# 3. 将解析结果同步到工作流 State 中：
-#    - state["task"] = parsed_requirement_summary
-#    - state["issue_number"] = 42
-#    - state["issue_url"] = "https://github.com/.../issues/42"
-# 4. 启动工作流：Plan → Code → Test → Review
-# 工�流按照 Plan → Code → Test → Review 的流程执行
-# 每个节点都可以通过 Issue 评论进行反馈和协作
-# 审查节点会自动在 Issue 中添加评论，记录测试结果和审查意见
-```
-
-### 3. 迭代与反馈
-
-**测试/审查发现问题时的自动流程**：
-
-1. **Tester 节点**：
-   - 运行生成的代码并执行测试套件
-   - 如果测试失败，自动在 Issue 中创建评论
-   - 评论格式：`🐛 Test Failed: <错误信息>`，包含回溯信息和失败的测试用例
-   - 例如：`🐛 Test Failed: json.tool encountered error on line 5: Expecting value: line 1 column 1 (got: '<')`
-
-2. **Reviewer 节点**：
-   - 分析代码质量和测试结果
-   - 如果发现问题，在 Issue 中添加审查评论
-   - 评论格式：`👁️ Review: <具体反馈>`，可能包括代码风格问题、安全隐患、逻辑建议
-   - 可以使用 GitHub 的审查功能，发出 `changes_requested` 或 `approved` 状态
-
-3. **Coder 收到反馈**：
-   - Coder 节点定期检查 Issue 中的新评论
-   - 根据评论内容解析出具体的修改需求
-   - 更新计划：`plan["feedback"] = "<从Issue评论中提取的反馈>"`
-   - 重新进入 Code 节点，根据反馈修改代码
-   - 修改后的代码再次提交，循环进入 Test → Review 环节
-
-**完成后的流程**：
-
-- 如果所有测试通过且审查通过：
-  - Coder 更新 Issue 状态：`python -m aidevteam.cli requirement update 42 --status "approved"`
-  - CLI 调用 REST API: PATCH /repos/{owner}/{repo}/issues/42
-  - 请求体: `{ "state": "closed", "labels": ["completed"] }`
-  - Issue 关闭，任务标记为 completed
-
-- 如果需要继续迭代：
-  - 保持 Issue 开放状态
-  - 下一次 `run --issue 42` 将继续从上次中断的位置继续
-  - 工作流状态通过 Issue 的 comment 历史完整记录
-
-### 4. 工作流持久化
-
-**跨进程/跨重启的状态恢复机制**：
-
-1. **Issue 作为持久化入口**：
-   - Issue 的状态（打开/关闭、标签）始终存储在 GitHub
-   - 即使工作流容器重启、Pod 漂移，Issue 记录不受影响
-   - 通过 Issue Key（Issue #42）永久标识该任务
-
-2. **状态恢复流程**：
-
-   ```bash
-   # 情况 A：工作流被中断或重启，需要恢复
-   AIDevTeam$ python -m aidevteam.cli run --issue 42
-   # CLI 自动检测：Issue #42 存在，且有关联的工作流状态
-   # - 如果 Issue 仍然打开：询问是否继续进行中的任务
-   # - 如果 Issue 已关闭：询问是否创建新任务或重新打开
-   
-   # 情况 B：明确恢复指定迭代
-   AIDevTeam$ python -m aidevteam.cli run --issue 42 --resume 3
-   # CLI 恢复到第3次迭代的状态
-   # 同步当前 State: iteration=3, 以及相关的 plan/code/test 结果
-   ```
-
-3. **Issue comment 作为执行日志**：
-
-   - 所有节点的执行结果、错误、反馈都通过 Issue comment 永久记录
-   - 便于事后审计和调试
-   - 格式统一：`🔧 <节点名>: <简述>`，例如 `🔧 Coder: 根据反馈修复了 JSON 解析错误`
-   - comment 历史可用于：回溯执行路径、分析失败原因、培训新成员
-
-4. **跨线程协作**：
-
-   - 多个并行进行的任务可以使用不同的 Issue Key
-   - 同一个任务的不同线程可以通过 Issue 评论协调
-   - 例如，一个任务的 Coder 完成后，可以在 Issue 中 @ 另一个任务的 Reviewer 进行代码审查
-
-5. **状态恢复的完整性检查**：
-
-   在恢复工作流前，CLI 会验证：
-   - Issue 是否仍然存在且可访问
-   - Issue 的当前状态是否允许恢复（是否关闭、是否被标记为 completed）
-   - 本地缓存的 State 与 Issue 记录是否一致
-   - 如果不一致，优先使用 Issue 记录作为真实来源
-
-### 6. 完整工作流示例
-
-```mermaid
-flowchart TD
-    A[创建 Issue] --> B[CLI 同步 Issue 内容]
-    B --> C{工作流启动}
-    C -->|Plan| D[生成开发计划]
-    D -->|Code| E[生成代码]
-    E -->|Test| F[运行测试]
-    F -->|通过| G[审查通过]
-    F -->|失败| H[在 Issue 添加评论]
-    H -->|Coder 反馈| I[修改代码]
-    I -->|重新 Test| F
-    G -->|更新 Issue 状态| J[关闭 Issue]
-    J --> K[任务完成]
-    
-    style A fill:#e1f5fe
-    style J fill:#c8e6c9
-    style K fill:#c8e6c9
-</mermaid>
-
-## 六、总结
-
-这次需求管理改造的核心思想是：**将不确定的、易变的外部信息（需求文档、反馈意见）从内部 State 中剥离，转而依靠 GitHub Issue 这种成熟、免费且可追踪的载体。**
-
-**主要收益**：
-1. **Context 成本显著降低**：不再需要在每次 LLM 调用中携带完整的需求描述
-2. **信息持久性增强**：GitHub Issue 成为开发的中期记忆，跨进程、跨重启均可恢复
-3. **行为明确安全**：使用 REST API 替代 Agent+MCP，避免了模型行为的不确定性
-4. **扩展性更好**：为后续的按需加载、多线程并行执行奠定了基础
-
-**下一步计划**：
-- 完善 REST API 封装层，统一处理认证、重试和错误转换
-- 为 Planner 节点设计 Issue 感知的上下文加载逻辑
-- 实现 Issue 到 State 的自动映射和反向映射
-- 验证跨重启场景下的上下文恢复效果
-
-## 附录：协议一览
-
-| 操作 | 方法 | 端点 | 说明 |
-|------|------|------|------|
-| 创建需求 | POST | /repos/{owner}/{repo}/issues | 创建新的需求 Issue |
-| 列出需求 | GET | /repos/{owner}/{repo}/issues | 列出项目下的 Issue |
-| 获取详情 | GET | /repos/{owner}/{repo}/issues/{number} | 获取指定 Issue 的详细信息 |
-| 更新状态 | PATCH | /repos/{owner}/{repo}/issues/{number} | 更新 Issue 的标签、状态等 |
-| 添加评论 | POST | /repos/{owner}/{repo}/issues/{number}/comments | 在 Issue 中添加评论 |
-
----
-
-*本次改造承接自 v1-v4 系列文章的经验累积：v1 验证了核心工作流闭环，v2 引入了容器化安全边界，v3 增加了人工审批机制，v4 实现了 checkpoint 持久化。本次改造将重点放在外部需求的管理与内部工作流的协同上，使得 AI 开发团队不仅能够可靠地执行任务，还能够从海量的开发需求中高效地检索和复用上下文。*
+另外也可以思考为什么当前不适合将bug管理和代码管理也放入Github。这个计划在稍后的文章中予以解答
